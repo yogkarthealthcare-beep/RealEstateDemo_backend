@@ -803,6 +803,7 @@ const ensureHomeExperienceSchema = () => {
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS section_visibility JSONB NOT NULL DEFAULT '{"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb`;
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS slider_show_indicator BOOLEAN NOT NULL DEFAULT TRUE`.catch(() => {});
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS slider_darkness INTEGER NOT NULL DEFAULT 45`.catch(() => {});
+      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS slider_show_content BOOLEAN NOT NULL DEFAULT TRUE`.catch(() => {});
       await sql`UPDATE home_page_settings SET display_type = 'hero_slider', show_hero_slider = TRUE, section_visibility = section_visibility - 'hero_book_now' - 'hero_site_slider' WHERE id = 1`;
       await sql`
         CREATE TABLE IF NOT EXISTS investors (
@@ -2934,10 +2935,11 @@ app.get("/api/home-page/settings", async (_req, res) => {
     const settings = await getCachedOrFetch("home-page-settings", 15000, async () => {
       const [row] = await sql`
         SELECT display_type, show_hero_slider, show_information_section, section_visibility,
+               COALESCE(slider_show_content, TRUE) AS slider_show_content,
                COALESCE(slider_show_indicator, TRUE) AS slider_show_indicator,
                COALESCE(slider_darkness, 45) AS slider_darkness
         FROM home_page_settings WHERE id = 1 AND is_active = TRUE AND is_deleted = FALSE`;
-      return row || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {}, slider_show_indicator: true, slider_darkness: 45 };
+      return row || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {}, slider_show_content: true, slider_show_indicator: true, slider_darkness: 45 };
     });
     return ok(res, settings);
   } catch (e) {
@@ -2951,6 +2953,7 @@ app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
     await ensureHomeExperienceSchema();
     const [settings] = await sql`
       SELECT *,
+             COALESCE(slider_show_content, TRUE) AS slider_show_content,
              COALESCE(slider_show_indicator, TRUE) AS slider_show_indicator,
              COALESCE(slider_darkness, 45) AS slider_darkness
       FROM home_page_settings WHERE id = 1`;
@@ -2963,8 +2966,12 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
     await ensureHomeExperienceSchema();
     const displayType = "hero_slider";
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
-      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools", "slider_show_indicator", "slider_darkness"]
+      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools", "slider_show_content", "slider_show_indicator", "slider_darkness"]
         .map((key) => {
+          if (key === "slider_show_content") {
+            const val = req.body.slider_show_content !== undefined ? req.body.slider_show_content : req.body.section_visibility[key];
+            return [key, parseBool(val, true)];
+          }
           if (key === "slider_show_indicator") {
             const val = req.body.slider_show_indicator !== undefined ? req.body.slider_show_indicator : req.body.section_visibility[key];
             return [key, parseBool(val, true)];
@@ -2978,6 +2985,9 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
         }))
       : null;
 
+    const sliderShowContent = req.body.slider_show_content !== undefined
+      ? parseBool(req.body.slider_show_content, true)
+      : null;
     const sliderShowIndicator = req.body.slider_show_indicator !== undefined
       ? parseBool(req.body.slider_show_indicator, true)
       : null;
@@ -2991,6 +3001,7 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
         show_hero_slider = TRUE,
         show_information_section = ${parseBool(req.body.show_information_section, true)},
         section_visibility = CASE WHEN ${sectionVisibility === null} THEN section_visibility ELSE ${sql.json(sectionVisibility || {})} END,
+        slider_show_content = CASE WHEN ${sliderShowContent === null} THEN slider_show_content ELSE ${sliderShowContent} END,
         slider_show_indicator = CASE WHEN ${sliderShowIndicator === null} THEN slider_show_indicator ELSE ${sliderShowIndicator} END,
         slider_darkness = CASE WHEN ${sliderDarkness === null} THEN slider_darkness ELSE ${sliderDarkness} END,
         updated_at = NOW()
