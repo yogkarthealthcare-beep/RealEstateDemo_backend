@@ -673,16 +673,14 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
 
 router.get('/admin/plot-orders/search-invoices', verifyAdminToken, async (req, res) => {
   try {
-    const {
-      search = '',
-      user_type = 'All',
-      selected_user_id,
-      status_filter = 'All',
-      payment_type_filter = 'All',
-      from_date,
-      to_date,
-      sort = 'latest'
-    } = req.query;
+    const search = req.query.search || req.query.q || '';
+    const user_type = req.query.user_type || 'All';
+    const selected_user_id = req.query.selected_user_id;
+    const status_filter = req.query.status_filter || req.query.status || 'All';
+    const payment_type_filter = req.query.payment_type_filter || req.query.payment_type || 'All';
+    const from_date = req.query.from_date;
+    const to_date = req.query.to_date;
+    const sort = req.query.sort || 'latest';
 
     const searchTerm = String(search || '').trim().toLowerCase();
     const searchNum = Number(searchTerm);
