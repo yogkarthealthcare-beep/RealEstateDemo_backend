@@ -523,7 +523,7 @@ const upload = multer({
         isSiteMap
           ? "Only JPG, JPEG, PNG, PDF, and SVG files are allowed."
           : isSiteImage
-            ? "Only JPG, JPEG, and PNG files are allowed."
+            ? "Only JPG, JPEG, PNG, and WEBP files are allowed."
             : isCompanyDocument
               ? "Only JPG, JPEG, PNG, WEBP, and PDF files are allowed."
               : "Only JPG, PNG, WEBP, and PDF files are allowed."
