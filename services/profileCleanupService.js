@@ -220,8 +220,9 @@ export async function deleteAssociateProfile(associateId, adminActor = { admin_i
             await safeTxExec(tx, "associate_status_history", async (sp) => {
                 await sp`DELETE FROM associate_status_history WHERE associate_user_id = ${uid}`;
             });
-            await safeTxExec(tx, "mlm_network", async (sp) => {
-                await sp`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
+            await safeTxExec(tx, "mlm_network_downline_reassign", async (sp) => {
+                await sp`UPDATE mlm_network SET sponsor_user_id = 1 WHERE sponsor_user_id = ${uid} AND associate_user_id != ${uid}`;
+                await sp`DELETE FROM mlm_network WHERE associate_user_id = ${uid}`;
             });
             await safeTxExec(tx, "mlm_tree_closure", async (sp) => {
                 await sp`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
@@ -341,6 +342,9 @@ export async function deleteAssociateProfile(associateId, adminActor = { admin_i
             });
             await safeTxExec(tx, "users_master", async (sp) => {
                 await sp`DELETE FROM users WHERE user_id = ${uid}`;
+            });
+            await safeTxExec(tx, "sync_sequences", async (sp) => {
+                await sp`SELECT setval('users_user_id_seq', (SELECT GREATEST(COALESCE(MAX(user_id), 1), 1) FROM users), true)`.catch(() => {});
             });
         }
 
@@ -727,6 +731,9 @@ export async function deleteCustomerProfile(customerId, adminActor = { admin_id:
             // D. Delete from users master table
             await safeTxExec(tx, "users_master", async (sp) => {
                 await sp`DELETE FROM users WHERE user_id = ${uid}`;
+            });
+            await safeTxExec(tx, "sync_sequences", async (sp) => {
+                await sp`SELECT setval('users_user_id_seq', (SELECT GREATEST(COALESCE(MAX(user_id), 1), 1) FROM users), true)`.catch(() => {});
             });
         }
 

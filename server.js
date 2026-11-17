@@ -1578,8 +1578,20 @@ const requireMlmSchema = (() => {
             await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
           } catch (e) { }
           try {
-            await sql`DELETE FROM mlm_network WHERE id NOT IN (SELECT MIN(id) FROM mlm_network GROUP BY associate_user_id)`;
+            await sql`DELETE FROM mlm_network WHERE network_id NOT IN (SELECT MIN(network_id) FROM mlm_network GROUP BY associate_user_id)`;
             await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_network_assoc ON mlm_network(associate_user_id)`;
+            await sql`DELETE FROM mlm_network WHERE associate_user_id NOT IN (SELECT user_id FROM users)`;
+            await sql`DELETE FROM mlm_tree_closure WHERE ancestor_user_id NOT IN (SELECT user_id FROM users) OR descendant_user_id NOT IN (SELECT user_id FROM users)`;
+            await sql`DELETE FROM associate_sales_tracker WHERE associate_user_id NOT IN (SELECT user_id FROM users)`;
+            await sql`DELETE FROM associate_referral_links WHERE associate_user_id NOT IN (SELECT user_id FROM users)`;
+            await sql`
+              ALTER TABLE mlm_network DROP CONSTRAINT IF EXISTS fk_mlm_network_associate;
+              ALTER TABLE mlm_network ADD CONSTRAINT fk_mlm_network_associate FOREIGN KEY (associate_user_id) REFERENCES users(user_id) ON DELETE CASCADE;
+            `.catch(() => {});
+            await sql`
+              ALTER TABLE mlm_network DROP CONSTRAINT IF EXISTS fk_mlm_network_sponsor;
+              ALTER TABLE mlm_network ADD CONSTRAINT fk_mlm_network_sponsor FOREIGN KEY (sponsor_user_id) REFERENCES users(user_id) ON DELETE SET NULL;
+            `.catch(() => {});
           } catch (e) { }
           try {
             await sql`DELETE FROM referral_registrations WHERE id NOT IN (SELECT MIN(id) FROM referral_registrations GROUP BY referred_user_id)`;
@@ -1869,7 +1881,7 @@ const syncMlmTreeAndReferrals = async () => {
       SELECT user_id, sponsor_user_id FROM users WHERE sponsor_user_id IS NOT NULL AND sponsor_user_id <> user_id`;
     for (const u of sponsoredUsers) {
       try {
-        const [existingNet] = await sql`SELECT id FROM mlm_network WHERE associate_user_id = ${u.user_id} LIMIT 1`;
+        const [existingNet] = await sql`SELECT network_id FROM mlm_network WHERE associate_user_id = ${u.user_id} LIMIT 1`;
         if (!existingNet) {
           await sql`
             INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
@@ -1923,7 +1935,7 @@ const linkApprovedReferral = async (userId) => {
   }
 
   try {
-    const [existingNet] = await sql`SELECT id FROM mlm_network WHERE associate_user_id = ${user.user_id} LIMIT 1`;
+    const [existingNet] = await sql`SELECT network_id FROM mlm_network WHERE associate_user_id = ${user.user_id} LIMIT 1`;
     if (!existingNet) {
       await sql`
         INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
@@ -11964,7 +11976,7 @@ app.post("/api/admin/users/:id/approve",
           const [sponsor] = await sql`SELECT sponsor_user_id FROM users WHERE user_id = ${uid}`;
           const sponsorId = sponsor?.sponsor_user_id || null;
           const [existingNetwork] = await sql`
-            SELECT id FROM mlm_network WHERE associate_user_id = ${uid} LIMIT 1`;
+            SELECT network_id FROM mlm_network WHERE associate_user_id = ${uid} LIMIT 1`;
           if (!existingNetwork) {
             await sql`
               INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)

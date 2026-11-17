@@ -788,7 +788,11 @@ router.post('/register-quick', async (req, res) => {
             await tx`
               INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
               VALUES (${createdUser.user_id}, ${pendingObj.sponsor_user_id},
-                COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pendingObj.sponsor_user_id}), 0) + 1)`;
+                COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pendingObj.sponsor_user_id}), 0) + 1)
+              ON CONFLICT (associate_user_id) DO UPDATE
+              SET sponsor_user_id = EXCLUDED.sponsor_user_id,
+                  level = EXCLUDED.level,
+                  is_active = TRUE`;
           } catch (mlmErr) {
             console.warn('[register-quick direct] mlm_network warning:', mlmErr.message);
           }
@@ -1271,7 +1275,11 @@ async function completeUserRegistration(pending, res) {
         await tx`
           INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
           VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
-            COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)`;
+            COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)
+          ON CONFLICT (associate_user_id) DO UPDATE
+          SET sponsor_user_id = EXCLUDED.sponsor_user_id,
+              level = EXCLUDED.level,
+              is_active = TRUE`;
       } catch (mlmErr) {
         console.warn('[completeUserRegistration] mlm_network warning:', mlmErr.message);
       }
@@ -1603,7 +1611,7 @@ router.get('/sync-sequences', async (req, res) => {
   try {
     await sql`SELECT setval(pg_get_serial_sequence('users', 'user_id'), COALESCE(MAX(user_id), 1) + 1, false) FROM users`;
     await sql`SELECT setval(pg_get_serial_sequence('referral_registrations', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM referral_registrations`;
-    await sql`SELECT setval(pg_get_serial_sequence('mlm_network', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM mlm_network`;
+    await sql`SELECT setval(pg_get_serial_sequence('mlm_network', 'network_id'), COALESCE(MAX(network_id), 1) + 1, false) FROM mlm_network`;
     await sql`SELECT setval(pg_get_serial_sequence('user_addresses', 'address_id'), COALESCE(MAX(address_id), 1) + 1, false) FROM user_addresses`;
     await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), COALESCE(MAX(otp_id), 1) + 1, false) FROM otp_log`;
     await sql`SELECT setval(pg_get_serial_sequence('associate_referral_links', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM associate_referral_links`;

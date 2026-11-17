@@ -621,10 +621,12 @@ async function deleteUserChildRecords(tx, userIds, filesToUnlinkCollector = []) 
   await tx`DELETE FROM withdrawal_requests WHERE user_id IN ${tx(uIds)}`.catch(() => {});
 
   // Referrals
-  await tx`DELETE FROM referral_registrations WHERE sponsor_user_id IN ${tx(uIds)} OR referred_user_id IN ${tx(uIds)}`.catch(() => {});
+  await tx`UPDATE referral_registrations SET sponsor_user_id = 1 WHERE sponsor_user_id IN ${tx(uIds)} AND (referred_user_id IS NULL OR referred_user_id NOT IN ${tx(uIds)})`.catch(() => {});
+  await tx`DELETE FROM referral_registrations WHERE referred_user_id IN ${tx(uIds)}`.catch(() => {});
 
   // MLM Tree
-  await tx`DELETE FROM mlm_network WHERE associate_user_id IN ${tx(uIds)} OR sponsor_user_id IN ${tx(uIds)}`.catch(() => {});
+  await tx`UPDATE mlm_network SET sponsor_user_id = 1 WHERE sponsor_user_id IN ${tx(uIds)} AND associate_user_id NOT IN ${tx(uIds)}`.catch(() => {});
+  await tx`DELETE FROM mlm_network WHERE associate_user_id IN ${tx(uIds)}`.catch(() => {});
   await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id IN ${tx(uIds)} OR descendant_user_id IN ${tx(uIds)}`.catch(() => {});
 
   // Logs & Tokens
