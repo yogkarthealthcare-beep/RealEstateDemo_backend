@@ -811,7 +811,10 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
     const investorId = req.investor.id;
 
     const [user] = await sql`
-      SELECT iu.id, iu.full_name, iu.email, iu.mobile_number, iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status,
+      SELECT iu.id,
+             COALESCE(NULLIF(TRIM(iu.member_id), ''), ('MMR-INV-' || LPAD(iu.id::text, 5, '0'))) AS member_id,
+             COALESCE(NULLIF(TRIM(iu.member_id), ''), ('MMR-INV-' || LPAD(iu.id::text, 5, '0'))) AS referral_code,
+             iu.full_name, iu.email, iu.mobile_number, iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status,
              CASE 
                WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN 'Completed' 
                WHEN ie.id IS NOT NULL THEN 'Submitted' 

@@ -11421,38 +11421,6 @@ app.put("/api/admin/customers/:id",
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                'CustomerManagement', 'Updated', 'users', ${uid},
-                ${JSON.stringify({ email, mobile_no: mobileNo, status: accountStatus, password_changed: Boolean(passwordHash) })})`;
-
-      return ok(res, customer, "Customer updated successfully");
-    } catch (e) {
-      return err(res, e.message);
-    }
-  }
-);
-
-app.post("/api/admin/associates/seed-root",
-  verifyAdminToken,
-  role("SuperAdmin", "Admin"),
-  async (req, res) => {
-    try {
-      const result = await seedRootAssociateSuraj();
-      return ok(res, result, "Root Associate Suraj Kumar Verma registered successfully");
-    } catch (e) {
-      console.error("[Seed Root Associate Error]:", e);
-      return err(res, "Failed to seed root associate: " + e.message);
-    }
-  }
-);
-
-app.post("/api/admin/associates",
-  verifyAdminToken,
-  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager"),
-  async (req, res) => {
-    try {
-      const fullName = String(req.body.full_name || "").trim();
-      const email = String(req.body.email || "").toLowerCase().trim();
-      const mobileNo = String(req.body.mobile_no || req.body.phone || "").replace(/\D/g, "");
       const password = String(req.body.password || "password123");
       const confirmPassword = String(req.body.confirm_password || req.body.password || "password123");
       const accountStatus = String(req.body.account_status || "Active").trim();
