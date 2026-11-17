@@ -769,6 +769,7 @@ const ensureHomeSlidersSchema = () => {
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS show_button2 BOOLEAN NOT NULL DEFAULT TRUE`;
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS show_stats BOOLEAN NOT NULL DEFAULT TRUE`;
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS show_thumbnail BOOLEAN NOT NULL DEFAULT TRUE`;
+      await sql`ALTER TABLE home_sliders ALTER COLUMN title DROP NOT NULL`.catch(() => {});
       await sql`
         CREATE INDEX IF NOT EXISTS idx_home_sliders_active_order
         ON home_sliders (display_order ASC, id ASC)
@@ -800,6 +801,8 @@ const ensureHomeExperienceSchema = () => {
         VALUES (1) ON CONFLICT (id) DO NOTHING`;
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS show_hero_slider BOOLEAN NOT NULL DEFAULT TRUE`;
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS section_visibility JSONB NOT NULL DEFAULT '{"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb`;
+      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS slider_show_indicator BOOLEAN NOT NULL DEFAULT TRUE`.catch(() => {});
+      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS slider_darkness INTEGER NOT NULL DEFAULT 45`.catch(() => {});
       await sql`UPDATE home_page_settings SET display_type = 'hero_slider', show_hero_slider = TRUE, section_visibility = section_visibility - 'hero_book_now' - 'hero_site_slider' WHERE id = 1`;
       await sql`
         CREATE TABLE IF NOT EXISTS investors (
@@ -2930,9 +2933,11 @@ app.get("/api/home-page/settings", async (_req, res) => {
     await ensureHomeExperienceSchema();
     const settings = await getCachedOrFetch("home-page-settings", 15000, async () => {
       const [row] = await sql`
-        SELECT display_type, show_hero_slider, show_information_section, section_visibility
+        SELECT display_type, show_hero_slider, show_information_section, section_visibility,
+               COALESCE(slider_show_indicator, TRUE) AS slider_show_indicator,
+               COALESCE(slider_darkness, 45) AS slider_darkness
         FROM home_page_settings WHERE id = 1 AND is_active = TRUE AND is_deleted = FALSE`;
-      return row || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {} };
+      return row || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {}, slider_show_indicator: true, slider_darkness: 45 };
     });
     return ok(res, settings);
   } catch (e) {
@@ -2944,7 +2949,11 @@ app.get("/api/home-page/settings", async (_req, res) => {
 app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "Admin", "SiteManager"), async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
-    const [settings] = await sql`SELECT * FROM home_page_settings WHERE id = 1`;
+    const [settings] = await sql`
+      SELECT *,
+             COALESCE(slider_show_indicator, TRUE) AS slider_show_indicator,
+             COALESCE(slider_darkness, 45) AS slider_darkness
+      FROM home_page_settings WHERE id = 1`;
     return ok(res, settings);
   } catch (e) { return err(res, e.message); }
 });
@@ -2954,18 +2963,36 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
     await ensureHomeExperienceSchema();
     const displayType = "hero_slider";
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
-      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools"]
+      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools", "slider_show_indicator", "slider_darkness"]
         .map((key) => {
+          if (key === "slider_show_indicator") {
+            const val = req.body.slider_show_indicator !== undefined ? req.body.slider_show_indicator : req.body.section_visibility[key];
+            return [key, parseBool(val, true)];
+          }
+          if (key === "slider_darkness") {
+            const val = req.body.slider_darkness !== undefined ? req.body.slider_darkness : req.body.section_visibility[key];
+            return [key, Number.isInteger(Number(val)) ? Math.max(0, Math.min(80, Number(val))) : 45];
+          }
           if (req.body.section_visibility[key] === undefined && key === "master_property_tools") return [key, true];
           return [key, parseBool(req.body.section_visibility[key], true)];
         }))
       : null;
+
+    const sliderShowIndicator = req.body.slider_show_indicator !== undefined
+      ? parseBool(req.body.slider_show_indicator, true)
+      : null;
+    const sliderDarkness = req.body.slider_darkness !== undefined
+      ? Math.max(0, Math.min(80, Number(req.body.slider_darkness) || 0))
+      : null;
+
     const [settings] = await sql`
       UPDATE home_page_settings SET
         display_type = ${displayType},
         show_hero_slider = TRUE,
         show_information_section = ${parseBool(req.body.show_information_section, true)},
         section_visibility = CASE WHEN ${sectionVisibility === null} THEN section_visibility ELSE ${sql.json(sectionVisibility || {})} END,
+        slider_show_indicator = CASE WHEN ${sliderShowIndicator === null} THEN slider_show_indicator ELSE ${sliderShowIndicator} END,
+        slider_darkness = CASE WHEN ${sliderDarkness === null} THEN slider_darkness ELSE ${sliderDarkness} END,
         updated_at = NOW()
       WHERE id = 1 RETURNING *`;
     await logAdminAudit(req, "HomePage", "UpdateSettings", "home_page_settings", 1, sql.json(settings));
@@ -3343,13 +3370,12 @@ app.post("/api/admin/home-sliders",
   async (req, res) => {
     try {
       await ensureHomeSlidersSchema();
-      const title = String(req.body.title || "").trim();
-      if (!title) return err(res, "Slider title is required", 400);
+      const title = String(req.body.title || "").trim() || null;
 
       let imageUrl = String(req.body.image_url || "").trim();
       let imagePublicId = null;
       if (req.file) {
-        const saved = await saveFileToVPS(req.file.buffer, { module: "slider", entityId: title, entityType: "HomeSlider", originalName: req.file.originalname });
+        const saved = await saveFileToVPS(req.file.buffer, { module: "slider", entityId: title || "slider", entityType: "HomeSlider", originalName: req.file.originalname });
         imageUrl = saved.url;
         imagePublicId = null;
       }
@@ -3380,7 +3406,7 @@ app.post("/api/admin/home-sliders",
           ${String(req.body.tag_text || "").trim() || null},
           ${String(req.body.tag_icon || "").trim() || "fas fa-star"},
           ${String(req.body.thumbnail_url || "").trim() || imageUrl},
-          ${String(req.body.thumbnail_title || "").trim() || title},
+          ${String(req.body.thumbnail_title || "").trim() || title || "Slide"},
           ${String(req.body.thumbnail_subtitle || "").trim() || null},
           ${sql.json(parseSliderStats(req.body.stats_json))},
           ${parseBool(req.body.show_image, true)},
@@ -3398,7 +3424,7 @@ app.post("/api/admin/home-sliders",
           ${req.admin.admin_id || null}
         )
         RETURNING id, title`;
-      await logAdminAudit(req, "HomeSlider", "CreateSlider", "home_sliders", slider.id, sql.json({ title }));
+      await logAdminAudit(req, "HomeSlider", "CreateSlider", "home_sliders", slider.id, sql.json({ title: title || "No Title" }));
       return ok(res, slider, "Home slider created.", 201);
     } catch (e) {
       return err(res, e.message);
@@ -3477,8 +3503,7 @@ app.put("/api/admin/home-sliders/:id",
         await deleteFileFromStorage(existing.image_url, existing.image_public_id);
       }
 
-      const title = String(req.body.title || "").trim();
-      if (!title) return err(res, "Slider title is required", 400);
+      const title = String(req.body.title || "").trim() || null;
       await sql`
         UPDATE home_sliders SET
           title = ${title},
@@ -3495,7 +3520,7 @@ app.put("/api/admin/home-sliders/:id",
           tag_text = ${String(req.body.tag_text || "").trim() || null},
           tag_icon = ${String(req.body.tag_icon || "").trim() || "fas fa-star"},
           thumbnail_url = ${String(req.body.thumbnail_url || "").trim() || imageUrl},
-          thumbnail_title = ${String(req.body.thumbnail_title || "").trim() || title},
+          thumbnail_title = ${String(req.body.thumbnail_title || "").trim() || title || "Slide"},
           thumbnail_subtitle = ${String(req.body.thumbnail_subtitle || "").trim() || null},
           stats_json = ${sql.json(parseSliderStats(req.body.stats_json))},
           show_image = ${parseBool(req.body.show_image, true)},
@@ -3512,7 +3537,7 @@ app.put("/api/admin/home-sliders/:id",
           updated_by_admin_id = ${req.admin.admin_id || null},
           updated_at = NOW()
         WHERE id = ${req.params.id}`;
-      await logAdminAudit(req, "HomeSlider", "UpdateSlider", "home_sliders", req.params.id, sql.json({ title }));
+      await logAdminAudit(req, "HomeSlider", "UpdateSlider", "home_sliders", req.params.id, sql.json({ title: title || "No Title" }));
       return ok(res, {}, "Home slider updated.");
     } catch (e) {
       return err(res, e.message);

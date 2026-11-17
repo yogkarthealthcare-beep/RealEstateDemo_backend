@@ -40,9 +40,9 @@ export function calculateCommissionDistribution({
   const maxUpline = Math.max(parseInt(maxUplineParticipants ?? MAX_UPLINE_PARTICIPANTS, 10) || MAX_UPLINE_PARTICIPANTS, 0);
   const effectiveParticipants = Math.min(Math.max(parseInt(participantsCount || 0, 10) || 0, 0), maxUpline);
 
-  if (!(gaz > 0)) {
+  if (!(gaz > 0) || !isTeamMemberSeller) {
     return {
-      plotSizeGaj: 0,
+      plotSizeGaj: Number(gaz.toFixed(2)),
       baseAmount: Number(baseAmount || 0),
       sellerRatePerGaj: sellerRate,
       uplineRatePerGaj: uplineRate,
@@ -452,9 +452,17 @@ export async function generateCommissionForPayment({
       LIMIT 1
     `;
     const isTeamMemberSeller = Boolean(tmSellerRow) || seller.user_type === 'Team Member';
-    let leaderUserId = isTeamMemberSeller
-      ? Number(tmSellerRow?.associate_id || booking.associate_user_id || seller.sponsor_user_id || 0)
-      : sellerUserId;
+
+    // Strict Rule: Direct Associate sales do NOT distribute commission and do NOT credit wallets.
+    // Commission is ONLY distributed when the plot is sold by a Team Member under an Associate Leader.
+    if (!isTeamMemberSeller) {
+      return {
+        generated: 0,
+        reason: "Direct Associate sale - commission distribution disabled (only plot sales by Team Members under an Associate Leader are eligible)",
+      };
+    }
+
+    let leaderUserId = Number(tmSellerRow?.associate_id || booking.associate_user_id || seller.sponsor_user_id || 0);
 
     if (isTeamMemberSeller && (!leaderUserId || leaderUserId === sellerUserId)) {
       const [sellerUserRow] = await tx`
@@ -491,44 +499,34 @@ export async function generateCommissionForPayment({
 
     // 9. Prepare Upline Participants: 1 Associate Leader + up to 9 Active Team Members (Total max 10)
     const remainingParticipants = [];
-    if (isTeamMemberSeller) {
-      if (leaderUserId && leaderUserId !== sellerUserId) {
-        const [leaderUser] = await tx`
-          SELECT user_id, account_status, user_type
-          FROM users
-          WHERE user_id = ${leaderUserId}
-            AND user_type = 'Associate'
-        `;
-        const isLeaderActive = leaderUser && ['Active', 'Approved'].includes(leaderUser.account_status);
-        const leaderEligible =
-          leaderUser &&
-          (eligibility.require_active_associate === false || isLeaderActive) &&
-          (eligibility.exclude_blacklisted === false || leaderUser.account_status !== 'Blacklisted');
+    if (leaderUserId && leaderUserId !== sellerUserId) {
+      const [leaderUser] = await tx`
+        SELECT user_id, account_status, user_type
+        FROM users
+        WHERE user_id = ${leaderUserId}
+          AND user_type = 'Associate'
+      `;
+      const isLeaderActive = leaderUser && ['Active', 'Approved'].includes(leaderUser.account_status);
+      const leaderEligible =
+        leaderUser &&
+        (eligibility.require_active_associate === false || isLeaderActive) &&
+        (eligibility.exclude_blacklisted === false || leaderUser.account_status !== 'Blacklisted');
 
-        if (leaderEligible) {
-          remainingParticipants.push({
-            user_id: leaderUserId,
-            user_type: 'Associate',
-            role: 'AssociateLeader',
-          });
-        }
-      }
-
-      for (const tm of eligibleTeamMembers.slice(0, MAX_TEAM_MEMBER_UPLINE_SLOTS)) {
+      if (leaderEligible) {
         remainingParticipants.push({
-          user_id: Number(tm.user_id),
-          user_type: 'Team Member',
-          role: 'TeamMember',
+          user_id: leaderUserId,
+          user_type: 'Associate',
+          role: 'AssociateLeader',
         });
       }
-    } else {
-      for (const tm of eligibleTeamMembers.slice(0, MAX_UPLINE_PARTICIPANTS)) {
-        remainingParticipants.push({
-          user_id: Number(tm.user_id),
-          user_type: 'Team Member',
-          role: 'TeamMember',
-        });
-      }
+    }
+
+    for (const tm of eligibleTeamMembers.slice(0, MAX_TEAM_MEMBER_UPLINE_SLOTS)) {
+      remainingParticipants.push({
+        user_id: Number(tm.user_id),
+        user_type: 'Team Member',
+        role: 'TeamMember',
+      });
     }
 
     const uplineParticipants = remainingParticipants.slice(0, MAX_UPLINE_PARTICIPANTS);
