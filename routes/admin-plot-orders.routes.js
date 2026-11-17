@@ -948,4 +948,459 @@ router.post('/admin/plot-orders/:id/generate-invoice', verifyAdminToken, async (
   }
 });
 
+/**
+ * 5. GET /api/admin/plot-orders/search-invoices
+ * Comprehensive Search Invoices API across Customer, Associate, and Investor.
+ * Supports partial name, exact ID, mobile, and email search.
+ * Returns full Plot Order history, invoices, installment breakdown, and non-duplicate financial summaries.
+ */
+router.get('/admin/plot-orders/search-invoices', verifyAdminToken, async (req, res) => {
+  try {
+    const {
+      search = '',
+      user_type = 'All',
+      selected_user_id,
+      status_filter = 'All',
+      payment_type_filter = 'All',
+      from_date,
+      to_date,
+      sort = 'latest'
+    } = req.query;
+
+    const searchTerm = String(search || '').trim().toLowerCase();
+    const searchNum = Number(searchTerm);
+
+    // 1. Search matching users across `users` and `investor_users`
+    let matchedUsers = [];
+
+    // A. Users table (Customer, Associate, Team Member)
+    if (user_type === 'All' || user_type === 'Customer' || user_type === 'Associate') {
+      const typeCond = user_type === 'Customer'
+        ? sql`AND LOWER(u.user_type::text) = 'customer'`
+        : (user_type === 'Associate'
+          ? sql`AND (LOWER(u.user_type::text) = 'associate' OR LOWER(u.user_type::text) = 'team member')`
+          : sql`AND LOWER(u.user_type::text) != 'investor'`);
+
+      const searchCond = searchTerm ? sql`
+        AND (
+          ${!isNaN(searchNum) && searchNum > 0 ? sql`u.user_id = ${searchNum} OR` : sql``}
+          LOWER(COALESCE(u.member_id, '')) LIKE ${'%' + searchTerm + '%'}
+          OR LOWER(COALESCE(u.full_name, '')) LIKE ${'%' + searchTerm + '%'}
+          OR COALESCE(u.mobile_no, '') LIKE ${'%' + searchTerm + '%'}
+          OR LOWER(COALESCE(u.email, '')) LIKE ${'%' + searchTerm + '%'}
+        )
+      ` : sql``;
+
+      const mainUsers = await sql`
+        SELECT 
+          u.user_id,
+          u.member_id,
+          u.full_name,
+          u.mobile_no,
+          u.email,
+          u.user_type,
+          u.account_status
+        FROM users u
+        WHERE 1=1
+          ${typeCond}
+          ${searchCond}
+        ORDER BY u.user_id ASC
+        LIMIT 100
+      `;
+
+      for (const u of mainUsers) {
+        matchedUsers.push({
+          user_id: u.user_id,
+          member_id: u.member_id || `USR-${u.user_id}`,
+          full_name: u.full_name || 'Unnamed User',
+          mobile_no: u.mobile_no || '',
+          email: u.email || '',
+          user_type: u.user_type === 'Team Member' ? 'Associate' : u.user_type,
+          raw_user_type: u.user_type,
+          account_status: u.account_status || 'Active',
+          source_table: 'users'
+        });
+      }
+    }
+
+    // B. Investor Users table
+    if (user_type === 'All' || user_type === 'Investor') {
+      const searchCond = searchTerm ? sql`
+        AND (
+          ${!isNaN(searchNum) && searchNum > 0 ? sql`inv.id = ${searchNum} OR` : sql``}
+          LOWER(COALESCE(inv.member_id, '')) LIKE ${'%' + searchTerm + '%'}
+          OR LOWER(COALESCE(inv.full_name, '')) LIKE ${'%' + searchTerm + '%'}
+          OR COALESCE(inv.mobile_number, '') LIKE ${'%' + searchTerm + '%'}
+          OR LOWER(COALESCE(inv.email, '')) LIKE ${'%' + searchTerm + '%'}
+        )
+      ` : sql``;
+
+      const investorUsers = await sql`
+        SELECT 
+          inv.id AS user_id,
+          inv.member_id,
+          inv.full_name,
+          inv.mobile_number AS mobile_no,
+          inv.email,
+          'Investor' AS user_type,
+          inv.status AS account_status
+        FROM investor_users inv
+        WHERE inv.deleted_at IS NULL
+          ${searchCond}
+        ORDER BY inv.id ASC
+        LIMIT 100
+      `;
+
+      for (const inv of investorUsers) {
+        matchedUsers.push({
+          user_id: inv.user_id,
+          member_id: inv.member_id || `INV-${inv.user_id}`,
+          full_name: inv.full_name || 'Unnamed Investor',
+          mobile_no: inv.mobile_no || '',
+          email: inv.email || '',
+          user_type: 'Investor',
+          raw_user_type: 'Investor',
+          account_status: inv.account_status || 'active',
+          source_table: 'investor_users'
+        });
+      }
+    }
+
+    // 2. Fetch order metrics for all matched users (non-duplicate calculation)
+    const userIds = matchedUsers.filter(u => u.source_table === 'users').map(u => u.user_id);
+    const investorEmails = matchedUsers.filter(u => u.source_table === 'investor_users').map(u => u.email.toLowerCase()).filter(Boolean);
+
+    let userMetrics = {};
+    if (userIds.length > 0 || investorEmails.length > 0) {
+      const allOrders = await sql`
+        SELECT 
+          b.booking_id,
+          b.user_id,
+          b.plot_id,
+          COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0) AS final_price,
+          COALESCE(b.advance_amount, 0) AS advance_amount,
+          COALESCE(b.remaining_balance, 0) AS remaining_balance,
+          LOWER(COALESCE(u.email, '')) AS user_email
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN users u ON u.user_id = b.user_id
+        WHERE b.user_id IN ${userIds.length ? sql(userIds) : sql`(-1)`}
+           OR LOWER(COALESCE(u.email, '')) IN ${investorEmails.length ? sql(investorEmails) : sql`('__none__')`}
+      `;
+
+      const bIds = allOrders.map(o => o.booking_id);
+      let emiPaidMap = {};
+      if (bIds.length > 0) {
+        const emiSums = await sql`
+          SELECT booking_id, COALESCE(SUM(paid_amount), 0) AS total_emi_paid
+          FROM emi_schedules
+          WHERE booking_id IN ${sql(bIds)}
+          GROUP BY booking_id
+        `;
+        for (const e of emiSums) {
+          emiPaidMap[e.booking_id] = Number(e.total_emi_paid || 0);
+        }
+      }
+
+      for (const ord of allOrders) {
+        const uid = ord.user_id;
+        if (!userMetrics[uid]) {
+          userMetrics[uid] = {
+            total_orders: 0,
+            plots: new Set(),
+            total_booking_amount: 0,
+            total_paid_amount: 0,
+            total_pending_amount: 0
+          };
+        }
+        userMetrics[uid].total_orders += 1;
+        if (ord.plot_id) userMetrics[uid].plots.add(ord.plot_id);
+        const fPrice = Number(ord.final_price || 0);
+        const adv = Number(ord.advance_amount || 0);
+        const emiPaid = Number(emiPaidMap[ord.booking_id] || 0);
+        const paid = adv + emiPaid;
+
+        userMetrics[uid].total_booking_amount += fPrice;
+        userMetrics[uid].total_paid_amount += paid;
+        userMetrics[uid].total_pending_amount += Math.max(0, fPrice - paid);
+      }
+    }
+
+    matchedUsers = matchedUsers.map(u => {
+      const m = userMetrics[u.user_id] || {
+        total_orders: 0,
+        plots: new Set(),
+        total_booking_amount: 0,
+        total_paid_amount: 0,
+        total_pending_amount: 0
+      };
+      return {
+        ...u,
+        total_plot_orders: m.total_orders,
+        total_plots: m.plots instanceof Set ? m.plots.size : 0,
+        total_booking_amount: m.total_booking_amount,
+        total_paid_amount: m.total_paid_amount,
+        total_pending_amount: m.total_pending_amount
+      };
+    });
+
+    // 3. Resolve Selected User (prefer user with orders or first matched)
+    let selectedUser = null;
+    if (selected_user_id) {
+      selectedUser = matchedUsers.find(u => Number(u.user_id) === Number(selected_user_id)) || null;
+      if (!selectedUser) {
+        const [singleU] = await sql`
+          SELECT user_id, member_id, full_name, mobile_no, email, user_type, account_status 
+          FROM users WHERE user_id = ${Number(selected_user_id)}
+        `;
+        if (singleU) {
+          selectedUser = {
+            user_id: singleU.user_id,
+            member_id: singleU.member_id || `USR-${singleU.user_id}`,
+            full_name: singleU.full_name || 'User',
+            mobile_no: singleU.mobile_no || '',
+            email: singleU.email || '',
+            user_type: singleU.user_type,
+            account_status: singleU.account_status,
+            source_table: 'users',
+            total_plot_orders: 0,
+            total_plots: 0,
+            total_booking_amount: 0,
+            total_paid_amount: 0,
+            total_pending_amount: 0
+          };
+        }
+      }
+    } else if (matchedUsers.length > 0) {
+      // Pick first user who has plot orders, or just first user
+      selectedUser = matchedUsers.find(u => u.total_plot_orders > 0) || matchedUsers[0];
+    }
+
+    // 4. If selected user, fetch their complete Plot Orders and Invoices / Installment History
+    let ordersList = [];
+    let financialSummary = {
+      total_orders: 0,
+      total_plots: 0,
+      total_invoice_count: 0,
+      total_invoice_amount: 0,
+      total_paid_amount: 0,
+      total_pending_amount: 0,
+      paid_installments: 0,
+      pending_installments: 0,
+      overdue_installments: 0
+    };
+
+    if (selectedUser) {
+      const fromDateCond = from_date ? sql`AND b.created_at >= ${from_date}::timestamptz` : sql``;
+      const toDateCond = to_date ? sql`AND b.created_at <= (${to_date}::date + INTERVAL '1 day')::timestamptz` : sql``;
+
+      const rawBookings = await sql`
+        SELECT 
+          b.booking_id,
+          b.booking_serial,
+          COALESCE(b.booking_date, b.created_at) AS booking_date,
+          b.booking_status,
+          b.payment_type,
+          b.payment_method,
+          COALESCE(b.advance_amount, 0) AS advance_amount,
+          COALESCE(b.remaining_balance, 0) AS remaining_balance,
+          p.plot_id,
+          p.plot_number,
+          p.plot_area,
+          p.area_unit,
+          s.site_name,
+          s.city AS site_city,
+          COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0) AS final_plot_price
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN sites s ON s.site_id = p.site_id
+        WHERE b.user_id = ${selectedUser.user_id}
+          ${fromDateCond}
+          ${toDateCond}
+        ORDER BY b.created_at ${sort === 'oldest' ? sql`ASC` : sql`DESC`}
+      `;
+
+      const bookingIds = rawBookings.map(b => b.booking_id);
+
+      // Invoices
+      let invoicesByBooking = {};
+      let allInvoices = [];
+      if (bookingIds.length > 0) {
+        const rawInvoices = await sql`
+          SELECT 
+            i.invoice_id,
+            i.invoice_number,
+            i.booking_id,
+            COALESCE(i.invoice_date, i.created_at) AS invoice_date,
+            COALESCE(i.grand_total, i.subtotal, 0) AS invoice_amount,
+            COALESCE(i.paid_amount, 0) AS paid_amount,
+            COALESCE(i.balance_amount, 0) AS balance_amount,
+            i.payment_status,
+            i.payment_method,
+            COALESCE(i.order_id, b.booking_serial) AS transaction_id
+          FROM invoices i
+          LEFT JOIN bookings b ON b.booking_id = i.booking_id
+          WHERE i.booking_id IN ${sql(bookingIds)}
+          ORDER BY i.invoice_id ASC
+        `;
+        allInvoices = rawInvoices;
+        for (const inv of rawInvoices) {
+          if (!invoicesByBooking[inv.booking_id]) invoicesByBooking[inv.booking_id] = [];
+          invoicesByBooking[inv.booking_id].push({
+            invoice_id: inv.invoice_id,
+            invoice_number: inv.invoice_number,
+            invoice_date: inv.invoice_date,
+            invoice_amount: Number(inv.invoice_amount || 0),
+            paid_amount: Number(inv.paid_amount || 0),
+            balance_amount: Number(inv.balance_amount || 0),
+            payment_status: inv.payment_status || 'Paid',
+            payment_method: inv.payment_method || 'Standard',
+            transaction_id: inv.transaction_id || `MMR-INV-${inv.invoice_id}`
+          });
+        }
+      }
+
+      // Installments (EMI schedules)
+      let emiByBooking = {};
+      let allEmiList = [];
+      if (bookingIds.length > 0) {
+        const rawEmi = await sql`
+          SELECT 
+            emi_id,
+            booking_id,
+            installment_no,
+            due_date,
+            emi_amount,
+            COALESCE(paid_amount, 0) AS paid_amount,
+            GREATEST(0, emi_amount - COALESCE(paid_amount, 0)) AS pending_amount,
+            paid_date,
+            emi_status,
+            voucher_file_path,
+            CASE 
+              WHEN LOWER(emi_status) = 'paid' OR (paid_amount >= emi_amount AND emi_amount > 0) THEN 'Paid'
+              WHEN paid_amount > 0 AND paid_amount < emi_amount THEN 'Partially Paid'
+              WHEN due_date < NOW() AND (paid_amount IS NULL OR paid_amount < emi_amount) THEN 'Overdue'
+              ELSE 'Pending'
+            END AS computed_status
+          FROM emi_schedules
+          WHERE booking_id IN ${sql(bookingIds)}
+          ORDER BY installment_no ASC
+        `;
+        allEmiList = rawEmi;
+        for (const e of rawEmi) {
+          if (!emiByBooking[e.booking_id]) emiByBooking[e.booking_id] = [];
+          emiByBooking[e.booking_id].push(e);
+        }
+      }
+
+      // Build enriched orders
+      const userPlots = new Set();
+      let grandBookingTotal = 0;
+      let grandPaidTotal = 0;
+      let grandPendingTotal = 0;
+
+      for (const ord of rawBookings) {
+        if (ord.plot_id) userPlots.add(ord.plot_id);
+        const finalPrice = Number(ord.final_plot_price || 0);
+        const adv = Number(ord.advance_amount || 0);
+        const ordInvoices = invoicesByBooking[ord.booking_id] || [];
+        const ordEmi = emiByBooking[ord.booking_id] || [];
+
+        // Determine payment type
+        const pTypeRaw = String(ord.payment_type || '').toLowerCase();
+        const isOneTime = pTypeRaw.includes('full') || pTypeRaw.includes('one') || ordEmi.length === 0;
+        const normalizedPaymentType = isOneTime ? 'One-Time' : 'Installment';
+
+        // Filter by payment_type_filter if specified
+        if (payment_type_filter === 'One-Time' && !isOneTime) continue;
+        if (payment_type_filter === 'Installment' && isOneTime) continue;
+
+        // Calculate paid and pending accurately
+        let paidTotal = adv;
+        if (!isOneTime) {
+          const emiPaidSum = ordEmi.reduce((sum, e) => sum + Number(e.paid_amount || 0), 0);
+          paidTotal = adv + emiPaidSum;
+        }
+        const pendingTotal = Math.max(0, finalPrice - paidTotal);
+
+        grandBookingTotal += finalPrice;
+        grandPaidTotal += paidTotal;
+        grandPendingTotal += pendingTotal;
+
+        // Filter installments if status_filter is specified
+        let filteredInstallments = ordEmi.map(e => ({
+          emi_id: e.emi_id,
+          installment_no: e.installment_no,
+          due_date: e.due_date,
+          emi_amount: Number(e.emi_amount || 0),
+          paid_amount: Number(e.paid_amount || 0),
+          pending_amount: Number(e.pending_amount || 0),
+          paid_date: e.paid_date,
+          payment_status: e.computed_status,
+          invoice_number: ordInvoices[0]?.invoice_number || null,
+          transaction_id: ord.booking_serial || `ORD-${ord.booking_id}`
+        }));
+
+        if (status_filter && status_filter !== 'All') {
+          filteredInstallments = filteredInstallments.filter(e => e.payment_status.toLowerCase() === status_filter.toLowerCase());
+        }
+
+        ordersList.push({
+          booking_id: ord.booking_id,
+          booking_serial: ord.booking_serial || `MMR-ORD-${ord.booking_id}`,
+          site_name: ord.site_name || 'MMR Site',
+          plot_number: ord.plot_number ? String(ord.plot_number) : 'N/A',
+          plot_area: ord.plot_area ? `${ord.plot_area} ${ord.area_unit || 'Gaj'}` : '',
+          booking_date: ord.booking_date,
+          final_plot_price: finalPrice,
+          payment_type: normalizedPaymentType,
+          total_amount: finalPrice,
+          paid_amount: paidTotal,
+          pending_amount: pendingTotal,
+          booking_status: ord.booking_status || 'Submitted',
+          invoices: ordInvoices,
+          installments: filteredInstallments,
+          total_installments_count: ordEmi.length
+        });
+      }
+
+      // Financial Summary metrics
+      let paidEmiCount = 0;
+      let pendingEmiCount = 0;
+      let overdueEmiCount = 0;
+
+      for (const e of allEmiList) {
+        if (e.computed_status === 'Paid') paidEmiCount++;
+        else if (e.computed_status === 'Overdue') overdueEmiCount++;
+        else pendingEmiCount++;
+      }
+
+      const totalInvoiceAmt = allInvoices.reduce((sum, inv) => sum + Number(inv.invoice_amount || 0), 0);
+
+      financialSummary = {
+        total_orders: rawBookings.length,
+        total_plots: userPlots.size,
+        total_invoice_count: allInvoices.length,
+        total_invoice_amount: totalInvoiceAmt,
+        total_paid_amount: grandPaidTotal,
+        total_pending_amount: grandPendingTotal,
+        paid_installments: paidEmiCount,
+        pending_installments: pendingEmiCount,
+        overdue_installments: overdueEmiCount
+      };
+    }
+
+    return ok(res, {
+      users: matchedUsers,
+      selected_user: selectedUser,
+      orders: ordersList,
+      financial_summary: financialSummary
+    }, 'Search invoices data loaded successfully');
+
+  } catch (e) {
+    console.error('[search-invoices] error:', e);
+    return err(res, e.message || 'Failed to search invoices', 500);
+  }
+});
+
 export default router;
