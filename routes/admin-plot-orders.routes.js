@@ -671,289 +671,6 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
   return executePlotOrdersQuery(req, res, sql`TRUE`, { audience: 'admin' });
 });
 
-/**
- * 2. GET /api/admin/plot-orders/:id
- * Get full detailed specs for a single plot booking order (Admin Master View).
- */
-router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
-  const bookingId = Number(req.params.id);
-  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-  return executePlotOrderDetailQuery(req, res, bookingId, sql`TRUE`);
-});
-
-/**
- * User / Portal Plot Orders Endpoints (Team Member, Associate, Customer)
- * 3. GET /api/user/plot-orders
- */
-router.get('/user/plot-orders', verifyUserToken, async (req, res) => {
-  const scope = await resolvePlotOrderScope(req);
-  if (scope.error) return err(res, scope.error, scope.status);
-  return executePlotOrdersQuery(req, res, scope.scopeFilter, { user_role: scope.role });
-});
-
-/**
- * 4. GET /api/user/plot-orders/:id
- */
-router.get('/user/plot-orders/:id', verifyUserToken, async (req, res) => {
-  const bookingId = Number(req.params.id);
-  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-  const scope = await resolvePlotOrderScope(req);
-  if (scope.error) return err(res, scope.error, scope.status);
-  return executePlotOrderDetailQuery(req, res, bookingId, scope.scopeFilter);
-});
-
-/**
- * 5. POST /api/user/plot-orders/:id/generate-invoice
- */
-router.post('/user/plot-orders/:id/generate-invoice', verifyUserToken, async (req, res) => {
-  try {
-    const bookingId = Number(req.params.id);
-    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-    const scope = await resolvePlotOrderScope(req);
-    if (scope.error) return err(res, scope.error, scope.status);
-
-    // Verify booking is within caller's scope
-    const [allowed] = await sql`
-      SELECT booking_id FROM bookings b WHERE b.booking_id = ${bookingId} AND ${scope.scopeFilter} LIMIT 1
-    `;
-    if (!allowed) {
-      return err(res, 'Booking order not found or access unauthorized', 404);
-    }
-
-    const invoice = await createOrGetInvoice(bookingId);
-    return ok(res, { invoice }, 'Invoice generated successfully');
-  } catch (e) {
-    console.error('[UserPlotOrders] Error generating invoice:', e);
-    return err(res, e.message || 'Failed to generate invoice', 500);
-  }
-});
-
-/**
- * 3. PATCH /api/admin/plot-orders/:id/status
- * Direct approval or rejection from Admin Panel with full status consistency.
- * 
- * Rules:
- * - If status is 'Confirmed' or 'Approved':
- *   - Booking is marked 'Confirmed'
- *   - Plot is set to 'Sold' (or 'Booked')
- *   - Associate approval status is set to 'Approved'
- *   - Self-Purchase check: If buyer is buying for self, 0% commission is enforced!
- *     Commission is skipped with a clear record in logs.
- * - If status is 'Rejected':
- *   - Booking status marked 'Rejected'
- *   - Plot status reverted to 'Vacant'
- */
-router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
-  try {
-    const bookingId = Number(req.params.id);
-    const { status, reason, remarks } = req.body || {};
-
-    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-    if (!status || !['Confirmed', 'Approved', 'Rejected', 'Pending', 'Under Process', 'Submitted', 'Choose'].includes(status)) {
-      return err(res, "Status must be 'Confirmed'/'Approved', 'Rejected', 'Pending', 'Under Process', or 'Submitted'", 400);
-    }
-
-    const adminId = req.admin?.admin_id || req.user?.admin_id || 1;
-    const adminName = req.admin?.username || req.admin?.full_name || 'Admin';
-
-    const [booking] = await sql`
-      SELECT b.*, p.plot_id, p.plot_status, p.site_id,
-             (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      WHERE b.booking_id = ${bookingId}
-    `;
-
-    if (!booking) return err(res, 'Booking order not found', 404);
-
-    const isApprove = (status === 'Confirmed' || status === 'Approved');
-    const isReject = (status === 'Rejected');
-    const effectiveStatus = isApprove ? 'Confirmed' : (isReject ? 'Rejected' : status);
-
-    const cleanRemarks = remarks ? String(remarks).trim() : (reason ? String(reason).trim() : '');
-    const cleanReason = reason ? String(reason).trim() : (remarks ? String(remarks).trim() : '');
-
-    let updatedOrder = null;
-
-    if (isApprove) {
-      const notesApprove = cleanRemarks
-        ? sql`CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${cleanRemarks}::text)`
-        : sql`notes`;
-
-      // 1. Mark booking confirmed and associate approval approved
-      [updatedOrder] = await sql`
-        UPDATE bookings
-        SET
-          booking_status = 'Confirmed',
-          associate_approval_status = 'Approved',
-          confirmed_at = COALESCE(confirmed_at, NOW()),
-          notes = ${notesApprove}
-        WHERE booking_id = ${bookingId}
-        RETURNING *
-      `;
-
-      // 2. Update plot status to Sold or Booked
-      if (booking.plot_id) {
-        await sql`
-          UPDATE plots
-          SET plot_status = 'Sold', sold_at = COALESCE(sold_at, NOW()), updated_at = NOW()
-          WHERE plot_id = ${booking.plot_id}
-        `.catch(() => {});
-
-        // Log plot status history
-        await sql`
-          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${cleanRemarks || 'Approved by Admin in Plot Orders'}::text)
-        `.catch(() => {});
-      }
-
-      // 3. Task 7: Ensure EMI schedules exist for EMI orders (No invoices at approval)
-      if (booking.payment_type === 'EMI') {
-        try {
-          const { ensureEmiSchedulesForBooking } = await import('../services/emi.service.js');
-          await ensureEmiSchedulesForBooking(sql, booking);
-        } catch (emiErr) {
-          console.error('[AdminPlotOrders] EMI schedule generation notice:', emiErr.message);
-        }
-      }
-
-      // 4. Commission check:
-      // USER RULE: "कस्टमर अपने सेल्फ के लिए लगाता है, तो फिर उसमें ना ही किसी तरह का कमीशन होगा और ना ही कोई पेमेंट कटेगा। ये पूरा का पूरा जो पेमेंट होगा, इसका जो कस्टमर, जो टीम मेंबर है, ये जो भी ओनर है टीम मेंबर, ये उसको देगा।"
-      if (booking.is_self_purchase || booking.booking_type === 'SELF_PURCHASE' || booking.user_id === booking.sold_by_user_id) {
-        console.log(`[AdminPlotOrders] Booking #${bookingId} is SELF_PURCHASE by Member #${booking.user_id}. Commission is strictly 0%.`);
-      } else {
-        // Standard sale: trigger commission calculation if advance amount > 0
-        if (Number(booking.advance_amount) > 0 && booking.sold_by_user_id) {
-          try {
-            await commissionService.generateCommissionForPayment({
-              bookingId,
-              event: {
-                type: 'BookingAdvance',
-                sourceRef: `adv-${bookingId}`,
-                receivedAmount: Number(booking.advance_amount),
-                paymentType: booking.payment_type || 'Standard'
-              },
-              adminId
-            });
-          } catch (commErr) {
-            console.error('[AdminPlotOrders] Commission generation notice:', commErr.message);
-          }
-        }
-      }
-
-    } else if (isReject) {
-      const notesReject = cleanReason
-        ? sql`CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${cleanReason}::text)`
-        : sql`notes`;
-
-      // 1. Mark booking rejected
-      [updatedOrder] = await sql`
-        UPDATE bookings
-        SET
-          booking_status = 'Rejected',
-          associate_approval_status = 'Rejected',
-          associate_rejection_reason = ${cleanReason || 'Rejected by Admin'}::text,
-          notes = ${notesReject}
-        WHERE booking_id = ${bookingId}
-        RETURNING *
-      `;
-
-      // 2. Revert plot to Vacant
-      if (booking.plot_id) {
-        await sql`
-          UPDATE plots
-          SET plot_status = 'Vacant', updated_at = NOW()
-          WHERE plot_id = ${booking.plot_id}
-        `.catch(() => {});
-
-        // Release locks if any
-        await sql`
-          UPDATE plot_booking_locks
-          SET status = 'Expired', updated_at = NOW()
-          WHERE plot_id = ${booking.plot_id} AND status = 'Active'
-        `.catch(() => {});
-
-        await sql`
-          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${cleanReason || 'Rejected by Admin in Plot Orders'}::text)
-        `.catch(() => {});
-      }
-    } else if (status === 'Submitted' || status === 'Choose') {
-      const notesReset = cleanRemarks
-        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${cleanRemarks}::text)`
-        : sql`notes`;
-
-      [updatedOrder] = await sql`
-        UPDATE bookings
-        SET
-          booking_status = 'Submitted',
-          associate_approval_status = 'Pending',
-          confirmed_at = NULL,
-          notes = ${notesReset}
-        WHERE booking_id = ${bookingId}
-        RETURNING *
-      `;
-
-      if (booking.plot_id && booking.plot_status === 'Sold') {
-        await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`.catch(() => {});
-        await sql`
-          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, 'Sold', 'Vacant', ${adminId}, ${adminName}, 'Status reset to unreviewed')
-        `.catch(() => {});
-      }
-    } else {
-      const notesDirect = cleanRemarks
-        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${cleanRemarks}::text)`
-        : sql`notes`;
-
-      // Direct status update (Pending / Under Process)
-      [updatedOrder] = await sql`
-        UPDATE bookings
-        SET
-          booking_status = ${effectiveStatus},
-          notes = ${notesDirect}
-        WHERE booking_id = ${bookingId}
-        RETURNING *
-      `;
-    }
-
-    return ok(res, {
-      booking_id: bookingId,
-      status: effectiveStatus,
-      is_self_purchase: Boolean(booking.is_self_purchase),
-      order: updatedOrder
-    }, `Booking order status updated to ${effectiveStatus} successfully`);
-
-  } catch (e) {
-    console.error('[AdminPlotOrders] Error updating status:', e);
-    return err(res, e.message || 'Failed to update booking order status', 500);
-  }
-});
-
-/**
- * 4. POST /api/admin/plot-orders/:id/generate-invoice
- * Generates an invoice for an order if not already present.
- */
-router.post('/admin/plot-orders/:id/generate-invoice', verifyAdminToken, async (req, res) => {
-  try {
-    const bookingId = Number(req.params.id);
-    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-
-    const invoice = await createOrGetInvoice(bookingId);
-    return ok(res, { invoice }, 'Invoice generated successfully');
-  } catch (e) {
-    console.error('[AdminPlotOrders] Error generating invoice:', e);
-    return err(res, e.message || 'Failed to generate invoice', 500);
-  }
-});
-
-/**
- * 5. GET /api/admin/plot-orders/search-invoices
- * Comprehensive Search Invoices API across Customer, Associate, and Investor.
- * Supports partial name, exact ID, mobile, and email search.
- * Returns full Plot Order history, invoices, installment breakdown, and non-duplicate financial summaries.
- */
 router.get('/admin/plot-orders/search-invoices', verifyAdminToken, async (req, res) => {
   try {
     const {
@@ -1402,5 +1119,289 @@ router.get('/admin/plot-orders/search-invoices', verifyAdminToken, async (req, r
     return err(res, e.message || 'Failed to search invoices', 500);
   }
 });
+
+/**
+ * 2. GET /api/admin/plot-orders/:id
+ * Get full detailed specs for a single plot booking order (Admin Master View).
+ */
+router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+  return executePlotOrderDetailQuery(req, res, bookingId, sql`TRUE`);
+});
+
+/**
+ * User / Portal Plot Orders Endpoints (Team Member, Associate, Customer)
+ * 3. GET /api/user/plot-orders
+ */
+router.get('/user/plot-orders', verifyUserToken, async (req, res) => {
+  const scope = await resolvePlotOrderScope(req);
+  if (scope.error) return err(res, scope.error, scope.status);
+  return executePlotOrdersQuery(req, res, scope.scopeFilter, { user_role: scope.role });
+});
+
+/**
+ * 4. GET /api/user/plot-orders/:id
+ */
+router.get('/user/plot-orders/:id', verifyUserToken, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+  const scope = await resolvePlotOrderScope(req);
+  if (scope.error) return err(res, scope.error, scope.status);
+  return executePlotOrderDetailQuery(req, res, bookingId, scope.scopeFilter);
+});
+
+/**
+ * 5. POST /api/user/plot-orders/:id/generate-invoice
+ */
+router.post('/user/plot-orders/:id/generate-invoice', verifyUserToken, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+    const scope = await resolvePlotOrderScope(req);
+    if (scope.error) return err(res, scope.error, scope.status);
+
+    // Verify booking is within caller's scope
+    const [allowed] = await sql`
+      SELECT booking_id FROM bookings b WHERE b.booking_id = ${bookingId} AND ${scope.scopeFilter} LIMIT 1
+    `;
+    if (!allowed) {
+      return err(res, 'Booking order not found or access unauthorized', 404);
+    }
+
+    const invoice = await createOrGetInvoice(bookingId);
+    return ok(res, { invoice }, 'Invoice generated successfully');
+  } catch (e) {
+    console.error('[UserPlotOrders] Error generating invoice:', e);
+    return err(res, e.message || 'Failed to generate invoice', 500);
+  }
+});
+
+/**
+ * 3. PATCH /api/admin/plot-orders/:id/status
+ * Direct approval or rejection from Admin Panel with full status consistency.
+ * 
+ * Rules:
+ * - If status is 'Confirmed' or 'Approved':
+ *   - Booking is marked 'Confirmed'
+ *   - Plot is set to 'Sold' (or 'Booked')
+ *   - Associate approval status is set to 'Approved'
+ *   - Self-Purchase check: If buyer is buying for self, 0% commission is enforced!
+ *     Commission is skipped with a clear record in logs.
+ * - If status is 'Rejected':
+ *   - Booking status marked 'Rejected'
+ *   - Plot status reverted to 'Vacant'
+ */
+router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    const { status, reason, remarks } = req.body || {};
+
+    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+    if (!status || !['Confirmed', 'Approved', 'Rejected', 'Pending', 'Under Process', 'Submitted', 'Choose'].includes(status)) {
+      return err(res, "Status must be 'Confirmed'/'Approved', 'Rejected', 'Pending', 'Under Process', or 'Submitted'", 400);
+    }
+
+    const adminId = req.admin?.admin_id || req.user?.admin_id || 1;
+    const adminName = req.admin?.username || req.admin?.full_name || 'Admin';
+
+    const [booking] = await sql`
+      SELECT b.*, p.plot_id, p.plot_status, p.site_id,
+             (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase
+      FROM bookings b
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN users buyer ON buyer.user_id = b.user_id
+      WHERE b.booking_id = ${bookingId}
+    `;
+
+    if (!booking) return err(res, 'Booking order not found', 404);
+
+    const isApprove = (status === 'Confirmed' || status === 'Approved');
+    const isReject = (status === 'Rejected');
+    const effectiveStatus = isApprove ? 'Confirmed' : (isReject ? 'Rejected' : status);
+
+    const cleanRemarks = remarks ? String(remarks).trim() : (reason ? String(reason).trim() : '');
+    const cleanReason = reason ? String(reason).trim() : (remarks ? String(remarks).trim() : '');
+
+    let updatedOrder = null;
+
+    if (isApprove) {
+      const notesApprove = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
+      // 1. Mark booking confirmed and associate approval approved
+      [updatedOrder] = await sql`
+        UPDATE bookings
+        SET
+          booking_status = 'Confirmed',
+          associate_approval_status = 'Approved',
+          confirmed_at = COALESCE(confirmed_at, NOW()),
+          notes = ${notesApprove}
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+
+      // 2. Update plot status to Sold or Booked
+      if (booking.plot_id) {
+        await sql`
+          UPDATE plots
+          SET plot_status = 'Sold', sold_at = COALESCE(sold_at, NOW()), updated_at = NOW()
+          WHERE plot_id = ${booking.plot_id}
+        `.catch(() => {});
+
+        // Log plot status history
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${cleanRemarks || 'Approved by Admin in Plot Orders'}::text)
+        `.catch(() => {});
+      }
+
+      // 3. Task 7: Ensure EMI schedules exist for EMI orders (No invoices at approval)
+      if (booking.payment_type === 'EMI') {
+        try {
+          const { ensureEmiSchedulesForBooking } = await import('../services/emi.service.js');
+          await ensureEmiSchedulesForBooking(sql, booking);
+        } catch (emiErr) {
+          console.error('[AdminPlotOrders] EMI schedule generation notice:', emiErr.message);
+        }
+      }
+
+      // 4. Commission check:
+      // USER RULE: "कस्टमर अपने सेल्फ के लिए लगाता है, तो फिर उसमें ना ही किसी तरह का कमीशन होगा और ना ही कोई पेमेंट कटेगा। ये पूरा का पूरा जो पेमेंट होगा, इसका जो कस्टमर, जो टीम मेंबर है, ये जो भी ओनर है टीम मेंबर, ये उसको देगा।"
+      if (booking.is_self_purchase || booking.booking_type === 'SELF_PURCHASE' || booking.user_id === booking.sold_by_user_id) {
+        console.log(`[AdminPlotOrders] Booking #${bookingId} is SELF_PURCHASE by Member #${booking.user_id}. Commission is strictly 0%.`);
+      } else {
+        // Standard sale: trigger commission calculation if advance amount > 0
+        if (Number(booking.advance_amount) > 0 && booking.sold_by_user_id) {
+          try {
+            await commissionService.generateCommissionForPayment({
+              bookingId,
+              event: {
+                type: 'BookingAdvance',
+                sourceRef: `adv-${bookingId}`,
+                receivedAmount: Number(booking.advance_amount),
+                paymentType: booking.payment_type || 'Standard'
+              },
+              adminId
+            });
+          } catch (commErr) {
+            console.error('[AdminPlotOrders] Commission generation notice:', commErr.message);
+          }
+        }
+      }
+
+    } else if (isReject) {
+      const notesReject = cleanReason
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${cleanReason}::text)`
+        : sql`notes`;
+
+      // 1. Mark booking rejected
+      [updatedOrder] = await sql`
+        UPDATE bookings
+        SET
+          booking_status = 'Rejected',
+          associate_approval_status = 'Rejected',
+          associate_rejection_reason = ${cleanReason || 'Rejected by Admin'}::text,
+          notes = ${notesReject}
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+
+      // 2. Revert plot to Vacant
+      if (booking.plot_id) {
+        await sql`
+          UPDATE plots
+          SET plot_status = 'Vacant', updated_at = NOW()
+          WHERE plot_id = ${booking.plot_id}
+        `.catch(() => {});
+
+        // Release locks if any
+        await sql`
+          UPDATE plot_booking_locks
+          SET status = 'Expired', updated_at = NOW()
+          WHERE plot_id = ${booking.plot_id} AND status = 'Active'
+        `.catch(() => {});
+
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${cleanReason || 'Rejected by Admin in Plot Orders'}::text)
+        `.catch(() => {});
+      }
+    } else if (status === 'Submitted' || status === 'Choose') {
+      const notesReset = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
+      [updatedOrder] = await sql`
+        UPDATE bookings
+        SET
+          booking_status = 'Submitted',
+          associate_approval_status = 'Pending',
+          confirmed_at = NULL,
+          notes = ${notesReset}
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+
+      if (booking.plot_id && booking.plot_status === 'Sold') {
+        await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`.catch(() => {});
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+          VALUES (${booking.plot_id}, 'Sold', 'Vacant', ${adminId}, ${adminName}, 'Status reset to unreviewed')
+        `.catch(() => {});
+      }
+    } else {
+      const notesDirect = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
+      // Direct status update (Pending / Under Process)
+      [updatedOrder] = await sql`
+        UPDATE bookings
+        SET
+          booking_status = ${effectiveStatus},
+          notes = ${notesDirect}
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+    }
+
+    return ok(res, {
+      booking_id: bookingId,
+      status: effectiveStatus,
+      is_self_purchase: Boolean(booking.is_self_purchase),
+      order: updatedOrder
+    }, `Booking order status updated to ${effectiveStatus} successfully`);
+
+  } catch (e) {
+    console.error('[AdminPlotOrders] Error updating status:', e);
+    return err(res, e.message || 'Failed to update booking order status', 500);
+  }
+});
+
+/**
+ * 4. POST /api/admin/plot-orders/:id/generate-invoice
+ * Generates an invoice for an order if not already present.
+ */
+router.post('/admin/plot-orders/:id/generate-invoice', verifyAdminToken, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+
+    const invoice = await createOrGetInvoice(bookingId);
+    return ok(res, { invoice }, 'Invoice generated successfully');
+  } catch (e) {
+    console.error('[AdminPlotOrders] Error generating invoice:', e);
+    return err(res, e.message || 'Failed to generate invoice', 500);
+  }
+});
+
+/**
+ * 5. GET /api/admin/plot-orders/search-invoices
+ * Comprehensive Search Invoices API across Customer, Associate, and Investor.
+ * Supports partial name, exact ID, mobile, and email search.
+ * Returns full Plot Order history, invoices, installment breakdown, and non-duplicate financial summaries.
+ */
 
 export default router;
