@@ -1379,6 +1379,117 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
 });
 
 /**
+ * 3B. DELETE /api/admin/plot-orders/:id & /api/admin/orders/:id
+ * Permanently deletes a booking order, cascade-removes related records (EMIs, invoices, proofs),
+ * and resets the plot status back to 'Vacant' (Available - Green) so anyone can book it again.
+ */
+router.delete(['/admin/plot-orders/:id', '/admin/orders/:id'], verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
+  try {
+    const rawTarget = String(req.params.id || '').trim();
+    if (!rawTarget) return err(res, 'Target booking or order ID is required', 400);
+
+    const isNumeric = !isNaN(Number(rawTarget)) && Number(rawTarget) > 0;
+    const numId = isNumeric ? Number(rawTarget) : 0;
+
+    // 1. Look up booking by ID, serial, or invoice number
+    let [booking] = await sql`
+      SELECT b.booking_id, b.booking_serial, b.plot_id, b.user_id, b.booking_status,
+             p.plot_number, p.site_id, p.plot_status
+      FROM bookings b
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      WHERE (b.booking_id = ${numId} AND ${numId} > 0)
+         OR LOWER(COALESCE(b.booking_serial, '')) = ${rawTarget.toLowerCase()}
+      LIMIT 1
+    `.catch(() => []);
+
+    if (!booking) {
+      const [inv] = await sql`
+        SELECT b.booking_id, b.booking_serial, b.plot_id, b.user_id, b.booking_status,
+               p.plot_number, p.site_id, p.plot_status
+        FROM invoices i
+        JOIN bookings b ON b.booking_id = i.booking_id
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE LOWER(COALESCE(i.invoice_number, '')) = ${rawTarget.toLowerCase()}
+           OR (i.invoice_id = ${numId} AND ${numId} > 0)
+        LIMIT 1
+      `.catch(() => []);
+      if (inv) {
+        booking = inv;
+      }
+    }
+
+    if (!booking) {
+      return err(res, `Booking or Order "${rawTarget}" not found`, 404);
+    }
+
+    const bookingId = booking.booking_id;
+    const plotId = booking.plot_id;
+    const plotNumber = booking.plot_number || 'N/A';
+    const oldPlotStatus = booking.plot_status || booking.booking_status || 'Booked';
+    const adminId = req.admin?.admin_id || req.user?.admin_id || req.user?.user_id || 1;
+    const adminName = req.admin?.username || req.admin?.full_name || req.user?.username || req.user?.full_name || 'Admin';
+
+    // 2. Cascade delete all linked / dependent tables
+    try { await sql`DELETE FROM emi_schedules WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM booking_payment_proofs WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM booking_payment_records WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM payment_records WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM booking_invoices WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM invoices WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM buyback_applications WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM buyback_requests WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM offline_bookings WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM booking_appointments WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM commission_monthly_schedule WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM commission_source_events WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM commission_transactions WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM plot_booking_history WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM plot_booking_locks WHERE booking_id = ${bookingId}`; } catch (_) {}
+    try { await sql`DELETE FROM registry_records WHERE booking_id = ${bookingId}`; } catch (_) {}
+
+    // 3. Delete the booking record itself
+    await sql`DELETE FROM bookings WHERE booking_id = ${bookingId}`;
+
+    // 4. Reset Plot status back to 'Vacant' (Available - Green)
+    if (plotId) {
+      await sql`
+        UPDATE plots
+        SET plot_status = 'Vacant',
+            updated_at = NOW()
+        WHERE plot_id = ${plotId}
+      `.catch((e) => {
+        console.error('[DeleteOrder] Error setting plot_status to Vacant:', e);
+      });
+
+      // Clear any active booking holds / locks on this plot
+      await sql`
+        UPDATE plot_booking_holds
+        SET status = 'Expired', updated_at = NOW()
+        WHERE plot_id = ${plotId} AND status = 'Active'
+      `.catch(() => {});
+
+      // Log status history for audit trace
+      await sql`
+        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+        VALUES (${plotId}, ${oldPlotStatus}, 'Vacant', ${adminId}, ${adminName}, ${'Order #' + (booking.booking_serial || bookingId) + ' deleted by Admin; plot released back to Available'}::text)
+      `.catch(() => {});
+    }
+
+    return ok(res, {
+      booking_id: bookingId,
+      booking_serial: booking.booking_serial,
+      plot_id: plotId,
+      plot_number: plotNumber,
+      plot_status: 'Vacant'
+    }, `Order #${booking.booking_serial || bookingId} deleted successfully. Plot #${plotNumber} is now Available (Green) for booking.`);
+
+  } catch (e) {
+    console.error('[AdminPlotOrders] Error deleting order:', e);
+    return err(res, e.message || 'Failed to delete booking order', 500);
+  }
+});
+
+/**
  * 4. POST /api/admin/plot-orders/:id/generate-invoice
  * Generates an invoice for an order if not already present.
  */

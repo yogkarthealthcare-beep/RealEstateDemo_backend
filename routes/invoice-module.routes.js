@@ -1586,24 +1586,30 @@ router.delete("/admin/orders/:id", adminAuth, async (req, res) => {
     // 2. Delete related records
     if (bookingId) {
       try { await sql`DELETE FROM emi_schedules WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM booking_payment_proofs WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM booking_payment_records WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM payment_records WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM booking_invoices WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM invoices WHERE booking_id = ${bookingId}`; } catch (_) {}
       try { await sql`DELETE FROM buyback_applications WHERE booking_id = ${bookingId}`; } catch (_) {}
       try { await sql`DELETE FROM buyback_requests WHERE booking_id = ${bookingId}`; } catch (_) {}
       try { await sql`DELETE FROM offline_bookings WHERE booking_id = ${bookingId}`; } catch (_) {}
-      await sql`DELETE FROM invoices WHERE booking_id = ${bookingId}`;
-      await sql`DELETE FROM booking_invoices WHERE booking_id = ${bookingId}`;
-      await sql`DELETE FROM booking_payment_records WHERE booking_id = ${bookingId}`;
+      try { await sql`DELETE FROM booking_appointments WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM commission_monthly_schedule WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM commission_source_events WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM commission_transactions WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM plot_booking_history WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM plot_booking_locks WHERE booking_id = ${bookingId}`; } catch (_) {}
+      try { await sql`DELETE FROM registry_records WHERE booking_id = ${bookingId}`; } catch (_) {}
       await sql`DELETE FROM bookings WHERE booking_id = ${bookingId}`;
     } else {
       await sql`DELETE FROM invoices WHERE invoice_id = ${targetId}`;
     }
 
-    // 3. Reset Plot status back to Available
+    // 3. Reset Plot status back to Vacant (Available)
     if (plotId) {
-      try {
-        await sql`UPDATE plots SET plot_status = 'Available', updated_at = NOW() WHERE plot_id = ${plotId}`;
-      } catch (_) {
-        try { await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${plotId}`; } catch (_) {}
-      }
+      await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${plotId}`.catch(() => {});
+      await sql`UPDATE plot_booking_holds SET status = 'Expired', updated_at = NOW() WHERE plot_id = ${plotId} AND status = 'Active'`.catch(() => {});
     }
 
     // 4. Audit Log
