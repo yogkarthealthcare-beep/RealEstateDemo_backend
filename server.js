@@ -11055,7 +11055,26 @@ app.post("/api/inquiries", async (req, res) => {
       if (!verifyCaptchaChallenge(captchaToken, captchaAnswer)) return err(res, "Captcha verification failed. Please try again.", 400);
     }
     if (siteId) {
-      const [site] = await sql`SELECT site_id FROM sites WHERE site_id=${siteId}`;
+      let [site] = await sql`SELECT site_id, site_name FROM sites WHERE site_id=${siteId}`;
+      if (!site) {
+        if (siteName) {
+          const [byName] = await sql`SELECT site_id, site_name FROM sites WHERE LOWER(TRIM(site_name)) = LOWER(TRIM(${siteName})) LIMIT 1`;
+          if (byName) {
+            site = byName;
+            siteId = byName.site_id;
+          }
+        }
+        if (!site) {
+          const [galleryRow] = await sql`SELECT site_name FROM site_gallery WHERE id = ${siteId} LIMIT 1`.catch(() => []);
+          if (galleryRow?.site_name) {
+            const [byGalleryName] = await sql`SELECT site_id, site_name FROM sites WHERE LOWER(TRIM(site_name)) = LOWER(TRIM(${galleryRow.site_name})) LIMIT 1`;
+            if (byGalleryName) {
+              site = byGalleryName;
+              siteId = byGalleryName.site_id;
+            }
+          }
+        }
+      }
       if (!site) return err(res, "Selected site is not active", 400);
     }
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
