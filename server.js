@@ -395,27 +395,15 @@ export async function ensurePlotManagementSchema() {
     `).catch(() => { });
     console.log("[PlotSchema] Ensured plots.unit_type VARCHAR(50) and dropped all restrictive unit_type check constraints.");
 
-    // Auto-heal orphaned InProcess/processing plots that have no active bookings, holds, or locks
+    // Auto-heal orphaned InProcess/processing plots that have no active bookings
     await sql`
-      UPDATE plots p
+      UPDATE plots
       SET plot_status = 'Vacant', updated_at = NOW()
-      WHERE p.plot_status::text IN ('InProcess', 'processing', 'PaymentPending', 'Hold', 'Reserved')
-        AND NOT EXISTS (
-          SELECT 1 FROM bookings b
-          WHERE b.plot_id = p.plot_id
-            AND b.booking_status::text NOT IN ('Cancelled', 'Rejected')
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM plot_booking_holds h
-          WHERE h.plot_id = p.plot_id
-            AND h.status = 'Active'
-            AND h.expires_at > NOW()
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM plot_booking_locks l
-          WHERE l.plot_id = p.plot_id
-            AND l.status = 'Locked'
-            AND l.lock_until > NOW()
+      WHERE plot_status::text IN ('InProcess', 'processing', 'PaymentPending', 'Hold', 'Reserved')
+        AND plot_id NOT IN (
+          SELECT plot_id FROM bookings
+          WHERE plot_id IS NOT NULL
+            AND booking_status::text NOT IN ('Cancelled', 'Rejected')
         )
     `.catch((e) => console.warn("[PlotSchema] Auto-heal orphaned InProcess plots warning:", e.message));
   } catch (err) {
@@ -7104,8 +7092,7 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
         CASE
           WHEN b.booking_status::text IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
           WHEN b.booking_status::text IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
-          WHEN (b.booking_id IS NOT NULL AND b.booking_status::text NOT IN ('Cancelled', 'Rejected')) 
-               OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+          WHEN b.booking_id IS NOT NULL AND b.booking_status::text NOT IN ('Cancelled', 'Rejected') THEN 'InProcess'
           ELSE COALESCE(p.plot_status::text, 'Vacant')
         END AS plot_status,
         p.plot_area,
