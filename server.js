@@ -3048,21 +3048,25 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
   } catch (e) { return err(res, e.message); }
 });
 
-app.get("/api/investors", async (_req, res) => {
+app.get("/api/investors", async (req, res) => {
   try {
     await ensureHomeExperienceSchema();
+    const showAll = req.query.all === 'true' || req.query.include_all === 'true';
+
     let minAmount = 50000;
     let isMinEnabled = true;
-    try {
-      const [settings] = await sql`
-        SELECT min_showcase_amount, is_showcase_min_enabled
-        FROM investor_settings
-        WHERE id = 1`;
-      if (settings) {
-        minAmount = Math.max(0, Number(settings.min_showcase_amount) || 0);
-        isMinEnabled = settings.is_showcase_min_enabled !== false;
-      }
-    } catch (_) {}
+    if (!showAll) {
+      try {
+        const [settings] = await sql`
+          SELECT min_showcase_amount, is_showcase_min_enabled
+          FROM investor_settings
+          WHERE id = 1`;
+        if (settings) {
+          minAmount = Math.max(0, Number(settings.min_showcase_amount) || 0);
+          isMinEnabled = settings.is_showcase_min_enabled !== false;
+        }
+      } catch (_) {}
+    }
 
     const showcase = await sql`
       SELECT 
@@ -3076,7 +3080,8 @@ app.get("/api/investors", async (_req, res) => {
       WHERE u.status = 'active' 
         AND u.deleted_at IS NULL
         AND (
-          ${!isMinEnabled} = TRUE 
+          ${showAll} = TRUE
+          OR ${!isMinEnabled} = TRUE 
           OR (
             GREATEST(COALESCE(u.available_balance, 0), COALESCE(u.total_investment, 0)) >= ${minAmount}
             AND GREATEST(COALESCE(u.available_balance, 0), COALESCE(u.total_investment, 0)) > 0

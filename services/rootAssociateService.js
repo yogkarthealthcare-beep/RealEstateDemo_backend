@@ -193,6 +193,8 @@ export async function seedRootAssociateSuraj() {
           education = 'Graduate',
           status = 'approved',
           is_final_submitted = TRUE,
+          signature_path = COALESCE(NULLIF(signature_path, ''), '/uploads/signatures/seller-signature.jpg'),
+          sponsor_signature_path = COALESCE(NULLIF(sponsor_signature_path, ''), '/uploads/signatures/seller-signature.jpg'),
           updated_at = NOW()
         WHERE id = ${enrId}
       `;

@@ -1791,6 +1791,48 @@ router.put("/admin/investors-portal/settings", authAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/investors-portal/stats
+router.get("/admin/investors-portal/stats", authAdmin, async (_req, res) => {
+  try {
+    const [userStats] = await sql`
+      SELECT 
+        COALESCE(SUM(total_investment), 0)::numeric as total_investment,
+        COALESCE(SUM(available_balance), 0)::numeric as total_investor_credit,
+        COALESCE(SUM(total_deposits), 0)::numeric as total_deposits_users,
+        COALESCE(SUM(total_withdrawals), 0)::numeric as total_withdrawals,
+        COUNT(*)::int as total_investors,
+        COUNT(CASE WHEN LOWER(COALESCE(status, '')) IN ('active', 'approved') THEN 1 END)::int as active_investors
+      FROM investor_users
+      WHERE deleted_at IS NULL`;
+
+    const [depStats] = await sql`
+      SELECT 
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'approved' THEN amount ELSE 0 END), 0)::numeric as approved_deposits,
+        COALESCE(SUM(amount), 0)::numeric as all_deposits
+      FROM investor_deposits`;
+
+    const totalInvestment = Number(userStats?.total_investment || 0);
+    const totalInvestorCredit = Number(userStats?.total_investor_credit || 0);
+    const totalDeposits = Math.max(
+      Number(depStats?.approved_deposits || 0),
+      Number(userStats?.total_deposits_users || 0)
+    );
+    const totalWithdrawals = Number(userStats?.total_withdrawals || 0);
+
+    return ok(res, {
+      total_investment: totalInvestment,
+      total_investor_credit: totalInvestorCredit,
+      total_deposits: totalDeposits,
+      total_withdrawals: totalWithdrawals,
+      total_investors: parseInt(userStats?.total_investors, 10) || 0,
+      active_investors: parseInt(userStats?.active_investors, 10) || 0
+    });
+  } catch (e) {
+    console.error("Admin Investor Portal Stats Error:", e);
+    return err(res, "Failed to load investor portal stats.");
+  }
+});
+
 // GET /api/admin/investors-portal
 router.get("/admin/investors-portal", authAdmin, async (req, res) => {
   try {
@@ -1840,12 +1882,44 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
     const [{ count }] = await sql`SELECT COUNT(*) FROM (${query}) AS count_query`;
     const rows = await sql`${query} ORDER BY iu.created_at DESC LIMIT ${limitNum} OFFSET ${offset}`;
 
+    // Overall Financial Stats across all investors
+    const [userStats] = await sql`
+      SELECT 
+        COALESCE(SUM(total_investment), 0)::numeric as total_investment,
+        COALESCE(SUM(available_balance), 0)::numeric as total_investor_credit,
+        COALESCE(SUM(total_deposits), 0)::numeric as total_deposits_users,
+        COALESCE(SUM(total_withdrawals), 0)::numeric as total_withdrawals,
+        COUNT(*)::int as total_investors,
+        COUNT(CASE WHEN LOWER(COALESCE(status, '')) IN ('active', 'approved') THEN 1 END)::int as active_investors
+      FROM investor_users
+      WHERE deleted_at IS NULL`;
+
+    const [depStats] = await sql`
+      SELECT 
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'approved' THEN amount ELSE 0 END), 0)::numeric as approved_deposits
+      FROM investor_deposits`;
+
+    const totalInvestment = Number(userStats?.total_investment || 0);
+    const totalInvestorCredit = Number(userStats?.total_investor_credit || 0);
+    const totalDeposits = Math.max(
+      Number(depStats?.approved_deposits || 0),
+      Number(userStats?.total_deposits_users || 0)
+    );
+
     return ok(res, {
       items: rows,
       total: parseInt(count, 10),
       page: pageNum,
       limit: limitNum,
-      total_pages: Math.ceil(parseInt(count, 10) / limitNum)
+      total_pages: Math.ceil(parseInt(count, 10) / limitNum),
+      stats: {
+        total_investment: totalInvestment,
+        total_investor_credit: totalInvestorCredit,
+        total_deposits: totalDeposits,
+        total_withdrawals: Number(userStats?.total_withdrawals || 0),
+        total_investors: parseInt(userStats?.total_investors, 10) || 0,
+        active_investors: parseInt(userStats?.active_investors, 10) || 0
+      }
     });
   } catch (e) {
     console.error("Admin Investors Portal Error:", e);

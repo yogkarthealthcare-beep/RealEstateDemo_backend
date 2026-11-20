@@ -96,6 +96,7 @@ export async function getEffectiveInvoiceSettings() {
       address: (row.address && !row.address.includes("Main Road, Lucknow")) ? row.address : defaults.address,
       phone: (row.phone && !row.phone.includes("98765")) ? row.phone : defaults.phone,
       email: (row.email && !row.email.includes("info@mmrconstructions.com")) ? row.email : defaults.email,
+      signature_url: row.signature_url || '/uploads/signatures/seller-signature.jpg',
     };
   } catch (err) {
     return defaults;

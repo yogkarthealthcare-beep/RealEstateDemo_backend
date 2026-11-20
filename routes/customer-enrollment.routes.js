@@ -464,6 +464,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             declaration_accepted = ${b.declarationAccepted || false},
             signature_sole_first_applicant_url = COALESCE(${finalSigSole}, signature_sole_first_applicant_url),
             signature_co_applicant_url = COALESCE(${finalSigCo}, signature_co_applicant_url),
+            signature_authorized_signatory_url = COALESCE(${sigAuthUrl}, signature_authorized_signatory_url, '/uploads/signatures/seller-signature.jpg'),
             terms_accepted = ${true},
             terms_accepted_at = NOW(),
             updated_at = NOW()
@@ -490,7 +491,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
             ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
             ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
-            ${b.declarationAccepted || false}, ${sigSoleUrl}, ${sigCoUrl}, ${sigAuthUrl}, ${true}, NOW()
+            ${b.declarationAccepted || false}, ${sigSoleUrl}, ${sigCoUrl}, ${sigAuthUrl || '/uploads/signatures/seller-signature.jpg'}, ${true}, NOW()
           ) RETURNING id
         `;
         newSubmissionId = newRow.id;
