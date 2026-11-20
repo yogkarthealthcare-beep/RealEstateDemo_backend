@@ -694,34 +694,42 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
             if (u)
                 existingUser = u;
         }
+        // Check if candidate is already actively enrolled in another associate's team
+        const cleanMobile10 = cleanMobile.length >= 10 ? cleanMobile.slice(-10) : cleanMobile;
+        const [otherAssociateMember] = await tx`
+          SELECT tm.id, tm.associate_id, tm.associate_name, tm.slot_number, tm.status
+          FROM team_members tm
+          WHERE (
+            (tm.user_id = ${existingUser ? existingUser.user_id : null} AND ${Boolean(existingUser)})
+            OR (RIGHT(regexp_replace(tm.mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10} AND ${Boolean(cleanMobile10)})
+            OR (tm.aadhar_no = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
+          )
+          AND tm.associate_id <> ${data.associateId}
+          AND tm.status <> 'rejected'
+          LIMIT 1
+        `;
+
+        if (otherAssociateMember) {
+            throw new Error(`This candidate is already enrolled in another Associate's team (${otherAssociateMember.associate_name || 'Associate #' + otherAssociateMember.associate_id}).`);
+        }
+
         let existingTm = null;
         if (existingUser) {
             if (String(existingUser.user_type || '').toLowerCase() === 'customer') {
                 throw new Error("Customer accounts cannot be converted to Team Members.");
             }
-            if (existingUser.sponsor_user_id && Number(existingUser.sponsor_user_id) !== Number(data.associateId)) {
-                throw new Error("Unauthorized: This user account is associated with a different sponsor.");
-            }
             userId = existingUser.user_id;
             existingTm = existingMembers.find((m) => Number(m.user_id) === Number(userId));
             // Finalized check removed to allow updating enrollment form
-            if (!existingUser.sponsor_user_id) {
-                await tx `
-          UPDATE users
-          SET sponsor_user_id = ${data.associateId}, updated_at = NOW()
-          WHERE user_id = ${userId}
-        `;
-            }
-            if (data.panNo || cleanAadhar) {
-                await tx `
-          UPDATE users
-          SET
-            pan_number = COALESCE(${data.panNo || null}, pan_number),
-            aadhar_number = COALESCE(${cleanAadhar || null}, aadhar_number),
-            updated_at = NOW()
-          WHERE user_id = ${userId}
-        `;
-            }
+            await tx`
+              UPDATE users
+              SET sponsor_user_id = ${data.associateId},
+                  user_type = 'Team Member',
+                  pan_number = COALESCE(${data.panNo || null}, pan_number),
+                  aadhar_number = COALESCE(${cleanAadhar || null}, aadhar_number),
+                  updated_at = NOW()
+              WHERE user_id = ${userId}
+            `;
         }
         const isFinalSubmit = (data.isFinalSubmit === true || data.isFinalSubmit === 'true' || data.is_final_submitted === true || data.is_final_submitted === 'true');
         // Determine assigned slot (1 to 10 direct members, 11 total with Team Lead)
@@ -758,7 +766,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
         UPDATE users
         SET user_type = 'Team Member',
             member_id = ${uid},
-            sponsor_user_id = COALESCE(sponsor_user_id, ${data.associateId}),
+            sponsor_user_id = ${data.associateId},
             password_hash = COALESCE(${pwdHash}, password_hash),
             updated_at = NOW()
         WHERE user_id = ${userId}
@@ -934,6 +942,34 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
                 }
                 catch (_) { }
             }
+            // Referral registrations sync
+            try {
+                const [existingRef] = await tx `SELECT id FROM referral_registrations WHERE referred_user_id = ${userId} LIMIT 1`;
+                if (existingRef) {
+                    await tx `
+                      UPDATE referral_registrations
+                      SET sponsor_user_id = ${data.associateId}, updated_at = NOW()
+                      WHERE id = ${existingRef.id}
+                    `;
+                }
+                else {
+                    await tx `
+                      INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+                      VALUES (${data.associateId}, ${userId}, 'Pending', NULL)
+                      ON CONFLICT (referred_user_id) DO UPDATE SET sponsor_user_id = ${data.associateId}
+                    `;
+                }
+            }
+            catch (_) { }
+            // User wallet sync
+            try {
+                await tx `
+                  INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+                  VALUES (${userId}, 'Team Member', 0, 0, 0, 0, 0)
+                  ON CONFLICT (user_id) DO NOTHING
+                `;
+            }
+            catch (_) { }
         }
         createdRecord = inserted;
     });
