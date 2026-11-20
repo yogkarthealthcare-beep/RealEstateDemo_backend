@@ -5295,7 +5295,11 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     const isCustomerLogin = String(user.user_type || '').toLowerCase() === 'customer';
-    if (!["Active", "Approved"].includes(String(user.account_status)) && !(isCustomerLogin && user.account_status === "Pending")) {
+    const isAssociateLogin = String(user.user_type || '').toLowerCase() === 'associate';
+    const isTeamMemberLogin = String(user.user_type || '').toLowerCase().includes('team member');
+    const isPendingAllowed = isCustomerLogin || isAssociateLogin || isTeamMemberLogin;
+
+    if (!["Active", "Approved"].includes(String(user.account_status)) && !(isPendingAllowed && user.account_status === "Pending")) {
       const message = user.account_status === "Pending"
         ? "Account pending admin approval"
         : "Account is not active. Contact support.";
@@ -5377,7 +5381,7 @@ app.post("/api/auth/login", async (req, res) => {
         invitation_code: user.invitation_code,
         email: user.email,
         account_status: user.account_status,
-        enrollment_status: isCustomerLogin ? 'completed' : undefined,
+        enrollment_status: isCustomerLogin ? 'completed' : (user.enrollment_status || (user.account_status === 'Active' ? 'completed' : 'pending')),
         email_verified: Boolean(user.email_verified || user.is_otp_verified)
       },
     }, "Login successful");
@@ -5537,7 +5541,7 @@ app.post("/api/auth/clear-otp-logs", async (req, res) => {
 
 app.post("/api/auth/reset-password", async (req, res) => {
   try {
-    const identifier = String(req.body.email || req.body.mobile_no || "").toLowerCase().trim();
+    const identifier = String(req.body.email || req.body.mobile_no || req.body.identifier || "").toLowerCase().trim();
     const { otp_code, otp, new_password } = req.body;
     const rawOtp = String(otp_code || otp || "").trim();
 
