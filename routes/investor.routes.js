@@ -303,6 +303,19 @@ async function ensureInvestorSchema() {
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS date_of_birth DATE`;
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS gender VARCHAR(20)`;
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS alternate_mobile VARCHAR(50)`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_settings (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        min_showcase_amount NUMERIC(12,2) NOT NULL DEFAULT 50000.00,
+        is_showcase_min_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+    await sql`
+      INSERT INTO investor_settings (id, min_showcase_amount, is_showcase_min_enabled)
+      VALUES (1, 50000.00, TRUE)
+      ON CONFLICT (id) DO NOTHING`;
   })().catch((error) => {
     investorSchemaReady = null;
     throw error;
@@ -1739,6 +1752,44 @@ router.get("/investor/transactions", authInvestor, handleInvestorTransactions);
 // ──────────────────────────────────────────────────────────────
 //  ADMIN INVESTOR PORTAL APIs
 // ──────────────────────────────────────────────────────────────
+
+// GET /api/admin/investors-portal/settings
+router.get("/admin/investors-portal/settings", authAdmin, async (_req, res) => {
+  try {
+    const [settings] = await sql`
+      SELECT id, min_showcase_amount, is_showcase_min_enabled, updated_at
+      FROM investor_settings
+      WHERE id = 1`;
+    return ok(res, settings || { min_showcase_amount: 50000, is_showcase_min_enabled: true });
+  } catch (e) {
+    return err(res, "Failed to load investor portal settings.");
+  }
+});
+
+// PUT /api/admin/investors-portal/settings
+router.put("/admin/investors-portal/settings", authAdmin, async (req, res) => {
+  try {
+    const minAmount = req.body.min_showcase_amount !== undefined
+      ? Math.max(0, Number(req.body.min_showcase_amount) || 0)
+      : 50000;
+    const isEnabled = req.body.is_showcase_min_enabled !== undefined
+      ? Boolean(req.body.is_showcase_min_enabled)
+      : true;
+
+    const [updated] = await sql`
+      INSERT INTO investor_settings (id, min_showcase_amount, is_showcase_min_enabled, updated_at)
+      VALUES (1, ${minAmount}, ${isEnabled}, NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        min_showcase_amount = EXCLUDED.min_showcase_amount,
+        is_showcase_min_enabled = EXCLUDED.is_showcase_min_enabled,
+        updated_at = NOW()
+      RETURNING *`;
+
+    return ok(res, updated, "Investor showcase settings updated successfully.");
+  } catch (e) {
+    return err(res, "Failed to update investor showcase settings.");
+  }
+});
 
 // GET /api/admin/investors-portal
 router.get("/admin/investors-portal", authAdmin, async (req, res) => {
