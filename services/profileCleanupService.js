@@ -779,6 +779,17 @@ export async function deleteCustomerProfile(customerId, adminActor = { admin_id:
 
 /**
  * DELETE INVESTOR PROFILE
+ * Permanently removes:
+ * 1. Investor User Account (investor_users)
+ * 2. Investor Enrollment submissions (investor_enrollments)
+ * 3. All Approved & Pending Deposits (investor_deposits)
+ * 4. All Approved & Pending Withdrawals (investor_withdrawals)
+ * 5. All Uploaded Documents & KYC (investor_documents)
+ * 6. All Financial Transactions (investor_transactions)
+ * 7. Settlement preferences and change requests
+ * 8. Investor Wallet (investor_wallet)
+ * 9. Showcase investor cards (investors)
+ * 10. Physical Photos, Signatures, Document files, Deposit Screenshots, and Withdrawal Proofs
  */
 export async function deleteInvestorProfile(investorId, adminActor = { admin_id: 1, full_name: "Admin" }) {
     const rawId = String(investorId || "").trim();
@@ -789,90 +800,223 @@ export async function deleteInvestorProfile(investorId, adminActor = { admin_id:
     }
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId);
     let targetInvestorId = null;
-    let targetEnrollmentId = isUuid ? rawId : null;
+    let targetUser = null;
+    const targetEnrollments = [];
+    const targetEnrollmentIds = new Set();
+    if (isUuid) targetEnrollmentIds.add(rawId);
 
-    if (isUuid) {
+    // 1. Resolve targetUser if rawId is numeric
+    if (/^\d+$/.test(rawId)) {
         try {
-            const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE id = ${rawId}`;
-            if (enrollment) {
-                targetInvestorId = enrollment.investor_id || null;
+            const [u] = await sql`SELECT * FROM investor_users WHERE id = ${Number(rawId)} LIMIT 1`;
+            if (u) {
+                targetUser = u;
+                targetInvestorId = u.id;
             }
         } catch (_) {}
-    } else {
-        targetInvestorId = Number(rawId);
     }
 
+    // 2. Resolve enrollment(s) by UUID, enrollment_id, or form_no
+    try {
+        const enrs = await sql`
+            SELECT * FROM investor_enrollments 
+            WHERE id::text = ${rawId} 
+               OR investor_enrollment_id = ${rawId} 
+               OR form_no = ${rawId}
+        `;
+        for (const e of enrs) {
+            targetEnrollments.push(e);
+            targetEnrollmentIds.add(String(e.id));
+            if (e.investor_id && !targetInvestorId) {
+                targetInvestorId = e.investor_id;
+            }
+        }
+    } catch (_) {}
+
+    // 3. Resolve user by member_id, mobile, email if not found
+    if (!targetUser) {
+        try {
+            const [u] = await sql`
+                SELECT * FROM investor_users 
+                WHERE member_id = ${rawId} 
+                   OR id::text = ${rawId}
+                   OR mobile_number = ${rawId} 
+                   OR email = ${rawId}
+                LIMIT 1
+            `;
+            if (u) {
+                targetUser = u;
+                targetInvestorId = u.id;
+            }
+        } catch (_) {}
+    }
+
+    // 4. If targetInvestorId is known, fetch targetUser and all corresponding enrollments
+    if (targetInvestorId) {
+        if (!targetUser) {
+            try {
+                const [u] = await sql`SELECT * FROM investor_users WHERE id = ${targetInvestorId} LIMIT 1`;
+                if (u) targetUser = u;
+            } catch (_) {}
+        }
+        try {
+            const enrs = await sql`
+                SELECT * FROM investor_enrollments 
+                WHERE investor_id = ${targetInvestorId}
+                   OR (${targetUser?.mobile_number ? targetUser.mobile_number : ''} != '' AND mobile = ${targetUser?.mobile_number || ''})
+                   OR (${targetUser?.email ? targetUser.email : ''} != '' AND email = ${targetUser?.email || ''})
+            `;
+            for (const e of enrs) {
+                targetEnrollmentIds.add(String(e.id));
+                if (!targetEnrollments.some(x => String(x.id) === String(e.id))) {
+                    targetEnrollments.push(e);
+                }
+            }
+        } catch (_) {}
+    } else if (targetEnrollments.length > 0) {
+        // If we have enrollment but no user yet, check by mobile or email
+        for (const e of targetEnrollments) {
+            if (e.mobile || e.email) {
+                try {
+                    const [u] = await sql`
+                        SELECT * FROM investor_users 
+                        WHERE (${e.mobile ? e.mobile : ''} != '' AND mobile_number = ${e.mobile || ''})
+                           OR (${e.email ? e.email : ''} != '' AND email = ${e.email || ''})
+                        LIMIT 1
+                    `;
+                    if (u) {
+                        targetUser = u;
+                        targetInvestorId = u.id;
+                        break;
+                    }
+                } catch (_) {}
+            }
+        }
+    }
+
+    if (!targetInvestorId && targetEnrollmentIds.size === 0) {
+        const err = new Error("Investor record not found.");
+        err.statusCode = 404;
+        throw err;
+    }
+
+    // 5. Collect all physical files for deletion (images, signatures, documents, deposit screenshots, withdrawal proofs)
     const filesToClean = [];
     const fileObjectsToClean = [];
 
+    // A. Enrollment Images and Signatures
+    for (const e of targetEnrollments) {
+        if (e.photo_url) filesToClean.push(e.photo_url);
+        if (e.applicant_photo_url) filesToClean.push(e.applicant_photo_url);
+        if (e.signature_first_url) filesToClean.push(e.signature_first_url);
+        if (e.signature_joint_url) filesToClean.push(e.signature_joint_url);
+        if (e.signature_url) filesToClean.push(e.signature_url);
+    }
+
+    // B. User Profile Picture
+    if (targetUser?.profile_picture_url) {
+        filesToClean.push(targetUser.profile_picture_url);
+    }
+
+    // C. Documents (investor_documents)
     if (targetInvestorId) {
         try {
-            const docs = await sql`SELECT file_url FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
-            docs.forEach((d) => { if (d.file_url) filesToClean.push(d.file_url); });
-        } catch (_) {}
-
-        try {
-            const [invUser] = await sql`SELECT profile_picture_url FROM investor_users WHERE id = ${targetInvestorId}`;
-            if (invUser?.profile_picture_url) filesToClean.push(invUser.profile_picture_url);
-        } catch (_) {}
-
-        try {
-            const deposits = await sql`SELECT payment_receipt_url FROM investor_deposits WHERE investor_id = ${targetInvestorId}`;
-            deposits.forEach((d) => { if (d.payment_receipt_url) filesToClean.push(d.payment_receipt_url); });
-        } catch (_) {}
-
-        try {
-            const enrolls = await sql`SELECT applicant_photo_url, signature_url FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`;
-            enrolls.forEach((e) => {
-                if (e.applicant_photo_url) filesToClean.push(e.applicant_photo_url);
-                if (e.signature_url) filesToClean.push(e.signature_url);
+            const docs = await sql`SELECT file_url, file_public_id FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
+            docs.forEach((d) => {
+                if (d.file_url) fileObjectsToClean.push({ url: d.file_url, publicId: d.file_public_id || "" });
             });
         } catch (_) {}
     }
 
+    // D. Deposits Screenshots & Receipts
+    if (targetInvestorId) {
+        try {
+            const deposits = await sql`
+                SELECT payment_screenshot_url, payment_receipt_url, file_url 
+                FROM investor_deposits 
+                WHERE investor_id = ${targetInvestorId}
+            `;
+            deposits.forEach((d) => {
+                if (d.payment_screenshot_url) filesToClean.push(d.payment_screenshot_url);
+                if (d.payment_receipt_url) filesToClean.push(d.payment_receipt_url);
+                if (d.file_url) filesToClean.push(d.file_url);
+            });
+        } catch (_) {}
+    }
+
+    // E. Withdrawals Receipts & Proofs
+    if (targetInvestorId) {
+        try {
+            const withdrawals = await sql`
+                SELECT receipt_url, file_url, proof_url 
+                FROM investor_withdrawals 
+                WHERE investor_id = ${targetInvestorId}
+            `;
+            withdrawals.forEach((w) => {
+                if (w.receipt_url) filesToClean.push(w.receipt_url);
+                if (w.file_url) filesToClean.push(w.file_url);
+                if (w.proof_url) filesToClean.push(w.proof_url);
+            });
+        } catch (_) {}
+    }
+
+    // 6. Database Deletion (Atomic Transaction)
     await sql.begin(async (tx) => {
         if (targetInvestorId) {
+            // Delete showcase profile
             await safeTxExec(tx, "investors", async (sp) => {
                 await sp`DELETE FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`;
             });
+            // Delete all deposits
             await safeTxExec(tx, "investor_deposits", async (sp) => {
                 await sp`DELETE FROM investor_deposits WHERE investor_id = ${targetInvestorId}`;
             });
+            // Delete all withdrawals
+            await safeTxExec(tx, "investor_withdrawals", async (sp) => {
+                await sp`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`;
+            });
+            // Delete all uploaded documents
             await safeTxExec(tx, "investor_documents", async (sp) => {
                 await sp`DELETE FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
             });
+            // Delete notifications
             await safeTxExec(tx, "investor_notifications", async (sp) => {
                 await sp`DELETE FROM investor_notifications WHERE investor_id = ${targetInvestorId}`;
             });
+            // Delete settlement preferences & requests
             await safeTxExec(tx, "investor_settlement_preferences", async (sp) => {
                 await sp`DELETE FROM investor_settlement_preferences WHERE investor_id = ${targetInvestorId}`;
             });
             await safeTxExec(tx, "settlement_change_requests", async (sp) => {
                 await sp`DELETE FROM settlement_change_requests WHERE investor_id = ${targetInvestorId}`;
             });
+            // Delete all financial transactions
             await safeTxExec(tx, "investor_transactions", async (sp) => {
                 await sp`DELETE FROM investor_transactions WHERE investor_id = ${targetInvestorId}`;
             });
-            await safeTxExec(tx, "investor_withdrawals", async (sp) => {
-                await sp`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`;
-            });
+            // Delete wallet
             await safeTxExec(tx, "investor_wallet", async (sp) => {
                 await sp`DELETE FROM investor_wallet WHERE investor_id = ${targetInvestorId}`;
             });
-            await safeTxExec(tx, "investor_enrollments", async (sp) => {
+            // Delete enrollments by investor_id
+            await safeTxExec(tx, "investor_enrollments_by_user", async (sp) => {
                 await sp`DELETE FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`;
             });
+            // Delete investor account
             await safeTxExec(tx, "investor_users", async (sp) => {
                 await sp`DELETE FROM investor_users WHERE id = ${targetInvestorId}`;
             });
         }
 
-        if (targetEnrollmentId) {
-            await safeTxExec(tx, "investor_enrollments_by_id", async (sp) => {
-                await sp`DELETE FROM investor_enrollments WHERE id = ${targetEnrollmentId}`;
+        // Delete any enrollments identified by UUIDs / form_no
+        if (targetEnrollmentIds.size > 0) {
+            const enrIdsList = Array.from(targetEnrollmentIds);
+            await safeTxExec(tx, "investor_enrollments_by_ids", async (sp) => {
+                await sp`DELETE FROM investor_enrollments WHERE id IN ${sp(enrIdsList)}`;
             });
         }
 
+        // Audit Log
         await safeTxExec(tx, "audit_log", async (sp) => {
             const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
             const actorName = String(adminActor.full_name || adminActor.username || "Admin");
@@ -884,11 +1028,11 @@ export async function deleteInvestorProfile(investorId, adminActor = { admin_id:
                     ${actorName}, 
                     'InvestorManagement', 
                     'Deleted', 
-                    'users', 
+                    'investor_users', 
                     ${targetInvestorId ? targetInvestorId : null}, 
                     ${JSON.stringify({
                         investor_id: targetInvestorId,
-                        enrollment_id: targetEnrollmentId,
+                        enrollment_ids: Array.from(targetEnrollmentIds),
                         files_collected_count: filesToClean.length + fileObjectsToClean.length
                     })}
                 )
@@ -896,13 +1040,15 @@ export async function deleteInvestorProfile(investorId, adminActor = { admin_id:
         });
     });
 
+    // 7. Cleanup physical files from VPS disk & Cloudinary
     const fileCleanResult = await cleanupPhysicalFiles(filesToClean, fileObjectsToClean);
+
     return {
         success: true,
-        message: "Investor and all profile-exclusive data deleted successfully.",
+        message: "Investor profile, enrollment, deposits, withdrawals, documents, and physical files deleted successfully.",
         data: {
             investorId: targetInvestorId,
-            enrollmentId: targetEnrollmentId,
+            enrollmentIds: Array.from(targetEnrollmentIds),
             filesDeleted: fileCleanResult.deletedCount,
             filesMissing: fileCleanResult.missingCount,
             warnings: fileCleanResult.warnings

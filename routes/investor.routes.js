@@ -316,6 +316,28 @@ async function ensureInvestorSchema() {
       INSERT INTO investor_settings (id, min_showcase_amount, is_showcase_min_enabled)
       VALUES (1, 50000.00, TRUE)
       ON CONFLICT (id) DO NOTHING`;
+
+    // Automatically clean orphaned records in investor tables where investor user is gone
+    await sql`
+      DELETE FROM investor_deposits 
+      WHERE investor_id NOT IN (SELECT id FROM investor_users WHERE deleted_at IS NULL)
+    `.catch(() => {});
+    await sql`
+      DELETE FROM investor_withdrawals 
+      WHERE investor_id NOT IN (SELECT id FROM investor_users WHERE deleted_at IS NULL)
+    `.catch(() => {});
+    await sql`
+      DELETE FROM investor_documents 
+      WHERE investor_id NOT IN (SELECT id FROM investor_users WHERE deleted_at IS NULL)
+    `.catch(() => {});
+    await sql`
+      DELETE FROM investor_transactions 
+      WHERE investor_id NOT IN (SELECT id FROM investor_users WHERE deleted_at IS NULL)
+    `.catch(() => {});
+    await sql`
+      DELETE FROM investor_wallet 
+      WHERE investor_id NOT IN (SELECT id FROM investor_users WHERE deleted_at IS NULL)
+    `.catch(() => {});
   })().catch((error) => {
     investorSchemaReady = null;
     throw error;
@@ -1986,7 +2008,7 @@ router.get("/admin/investors-portal/deposits", authAdmin, async (req, res) => {
     let query = sql`
       SELECT d.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number as investor_mobile
       FROM investor_deposits d
-      JOIN investor_users u ON d.investor_id = u.id
+      LEFT JOIN investor_users u ON d.investor_id = u.id
     `;
     if (status && status !== 'all') {
       query = sql`${query} WHERE d.status = ${status}`;
@@ -2232,7 +2254,7 @@ router.get("/admin/investors-portal/withdrawals", authAdmin, async (req, res) =>
     let query = sql`
       SELECT w.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number as investor_mobile, u.available_balance as current_balance
       FROM investor_withdrawals w
-      JOIN investor_users u ON w.investor_id = u.id
+      LEFT JOIN investor_users u ON w.investor_id = u.id
     `;
     if (status && status !== 'all') {
       query = sql`${query} WHERE w.status = ${status}`;
@@ -2327,7 +2349,7 @@ router.get("/admin/investors-portal/transactions", authAdmin, async (req, res) =
     const rows = await sql`
       SELECT t.*, u.full_name as investor_name, u.email as investor_email
       FROM investor_transactions t
-      JOIN investor_users u ON t.investor_id = u.id
+      LEFT JOIN investor_users u ON t.investor_id = u.id
       ORDER BY t.created_at DESC
       LIMIT 100
     `;
