@@ -80,6 +80,8 @@ export async function ensureTeamMembersTable(): Promise<void> {
     await sql`CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`.catch(() => {});
     await sql`CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`.catch(() => {});
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`.catch(() => {});
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_registrations_user ON referral_registrations (referred_user_id)`.catch(() => {});
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_user_wallets_user ON user_wallets (user_id)`.catch(() => {});
     await sql`
       UPDATE team_members tm
       SET 
@@ -955,18 +957,19 @@ export async function createTeamMemberRecord(
           await tx`
             INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
             VALUES (${data.associateId}, ${userId}, 'Pending', NULL)
-            ON CONFLICT (referred_user_id) DO UPDATE SET sponsor_user_id = ${data.associateId}
           `;
         }
       } catch (_) {}
 
       // User wallet sync
       try {
-        await tx`
-          INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
-          VALUES (${userId}, 'Team Member', 0, 0, 0, 0, 0)
-          ON CONFLICT (user_id) DO NOTHING
-        `;
+        const [existingWallet] = await tx`SELECT wallet_id FROM user_wallets WHERE user_id = ${userId} LIMIT 1`;
+        if (!existingWallet) {
+          await tx`
+            INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+            VALUES (${userId}, 'Team Member', 0, 0, 0, 0, 0)
+          `;
+        }
       } catch (_) {}
     }
 
