@@ -395,17 +395,17 @@ export async function ensurePlotManagementSchema() {
     `).catch(() => { });
     console.log("[PlotSchema] Ensured plots.unit_type VARCHAR(50) and dropped all restrictive unit_type check constraints.");
 
-    // Auto-heal orphaned InProcess/processing plots that have no active bookings
+    // Auto-heal orphaned plots (InProcess, Booked, Sold) that have no active bookings in the bookings table
     await sql`
       UPDATE plots
       SET plot_status = 'Vacant', updated_at = NOW()
-      WHERE plot_status::text IN ('InProcess', 'processing', 'PaymentPending', 'Hold', 'Reserved')
+      WHERE plot_status::text IN ('InProcess', 'processing', 'PaymentPending', 'Hold', 'Reserved', 'Booked', 'booked', 'Sold', 'sold', 'Sold Out')
         AND plot_id NOT IN (
           SELECT plot_id FROM bookings
           WHERE plot_id IS NOT NULL
             AND booking_status::text NOT IN ('Cancelled', 'Rejected')
         )
-    `.catch((e) => console.warn("[PlotSchema] Auto-heal orphaned InProcess plots warning:", e.message));
+    `.catch((e) => console.warn("[PlotSchema] Auto-heal orphaned plots warning:", e.message));
   } catch (err) {
     console.error("[PlotSchema] Schema migration error:", err.message || err);
   }
@@ -7133,9 +7133,10 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
         p.plot_number,
         COALESCE(p.unit_type, 'PLOT') AS unit_type,
         CASE
-          WHEN b.booking_status::text IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
-          WHEN b.booking_status::text IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
+          WHEN b.booking_status::text IN ('Confirmed', 'Sold') THEN 'Sold'
+          WHEN b.booking_status::text IN ('Booked', 'Approved', 'Submitted') THEN 'Booked'
           WHEN b.booking_id IS NOT NULL AND b.booking_status::text NOT IN ('Cancelled', 'Rejected') THEN 'InProcess'
+          WHEN b.booking_id IS NULL AND LOWER(COALESCE(p.plot_status::text, '')) IN ('booked', 'sold', 'sold out', 'inprocess', 'processing', 'hold') THEN 'Vacant'
           ELSE COALESCE(p.plot_status::text, 'Vacant')
         END AS plot_status,
         p.plot_area,
@@ -7358,10 +7359,10 @@ app.get("/api/sites/:id/map", async (req, res) => {
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
              p.file_charge,
              CASE
-               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
-               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
-               WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
-                    OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+               WHEN b.booking_status IN ('Confirmed', 'Sold') THEN 'Sold'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') THEN 'Booked'
+               WHEN b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected') THEN 'InProcess'
+               WHEN b.booking_id IS NULL AND LOWER(COALESCE(p.plot_status::text, '')) IN ('booked', 'sold', 'sold out', 'inprocess', 'processing', 'hold') THEN 'Vacant'
                ELSE COALESCE(p.plot_status::text, 'Vacant')
              END AS plot_status,
              p.coordinates_x, p.coordinates_y,
@@ -7442,10 +7443,10 @@ app.get("/api/sites/:id/plots", async (req, res) => {
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
              p.file_charge,
              CASE
-               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
-               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
-               WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
-                    OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+               WHEN b.booking_status IN ('Confirmed', 'Sold') THEN 'Sold'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') THEN 'Booked'
+               WHEN b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected') THEN 'InProcess'
+               WHEN b.booking_id IS NULL AND LOWER(COALESCE(p.plot_status::text, '')) IN ('booked', 'sold', 'sold out', 'inprocess', 'processing', 'hold') THEN 'Vacant'
                ELSE COALESCE(p.plot_status::text, 'Vacant')
              END AS plot_status,
              p.coordinates_x, p.coordinates_y,
