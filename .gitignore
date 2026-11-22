@@ -1,5 +1,4 @@
-.env
-.env.*
+# .env files tracked per user request
 node_modules/
 .vercel/
 uploads/
@@ -22,5 +21,4 @@ test_count.*
 dump_schema.*
 test-db.*
 tmp_schema/
-
-backups/*.json
+backups/
