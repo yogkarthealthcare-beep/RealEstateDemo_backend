@@ -969,6 +969,8 @@ const normalizeHeroSliderImages = (value, fallbackUrl = null, fallbackPublicId =
 
 const defaultCompanySettings = {
   company_name: "M.M.R. Constructions",
+  company_tagline: "Developers Pvt. Ltd.",
+  cin_number: "U68200UP2025PTC229203",
   company_logo_url: null,
   company_address: "Neel Kanth Market, Ramadevi, Kanpur, Uttar Pradesh",
   company_email: null,
@@ -1022,6 +1024,8 @@ const ensureCompanySettingsSchema = () => {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS cin_number TEXT`.catch(() => {});
+      await sql`ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS company_tagline TEXT`.catch(() => {});
       const [existing] = await sql`SELECT id FROM company_settings WHERE is_active = TRUE ORDER BY id LIMIT 1`;
       if (!existing) {
         await sql`
@@ -2851,7 +2855,7 @@ app.get(["/api/company-settings", "/company-settings"], getCompanySettings);
 
 app.get("/api/admin/company-settings",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager", "SupportStaff"),
+  role("SuperAdmin", "Admin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       const settings = await getCompanySettingsRow();
@@ -2919,7 +2923,7 @@ app.post("/api/admin/auth-settings",
 
 app.put("/api/admin/company-settings",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   async (req, res) => {
     try {
       await ensureCompanySettingsSchema();
@@ -2929,6 +2933,8 @@ app.put("/api/admin/company-settings",
       const [updated] = await sql`
         UPDATE company_settings SET
           company_name = ${next.company_name},
+          company_tagline = ${next.company_tagline},
+          cin_number = ${next.cin_number},
           company_logo_url = ${next.company_logo_url},
           company_address = ${next.company_address},
           company_email = ${next.company_email},
@@ -3884,7 +3890,7 @@ app.delete("/api/admin/company-documents/:id",
 
 const uploadCompanyAsset = (field) => [
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   companyAssetUpload.single("file"),
   async (req, res) => {
     try {

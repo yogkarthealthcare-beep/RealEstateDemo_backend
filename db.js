@@ -27,7 +27,7 @@ export const getSupabaseDatabaseUrl = () => {
 
 export const getDatabaseConfig = () => {
   const host = process.env.DATABASE_HOST || process.env.PGHOST || process.env.DB_HOST || "localhost";
-  const database = process.env.DATABASE_NAME || process.env.PGDATABASE || process.env.DB_NAME || "mmrconstructions";
+  const database = process.env.DATABASE_NAME || process.env.PGDATABASE || process.env.DB_NAME || "real_estate_demo";
   const port = process.env.DATABASE_PORT || process.env.PGPORT || process.env.DB_PORT || "5432";
   return { host, database, port };
 };
